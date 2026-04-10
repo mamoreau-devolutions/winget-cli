@@ -13,6 +13,7 @@ namespace AppInstaller::Caching
 {
     namespace anon
     {
+        constexpr std::wstring_view s_CachePathEnvVarW = L"WINGET_CACHE_PATH";
         std::string_view GetNameForType(FileCache::Type type)
         {
             switch (type)
@@ -141,21 +142,25 @@ namespace AppInstaller::Caching
 
     std::filesystem::path FileCache::Details::GetCachePath() const
     {
+        auto buildCachePath = [&](const std::filesystem::path& root) {
+            std::filesystem::path result = root;
+            result /= anon::GetNameForType(Type);
+            result /= Utility::ConvertToUTF16(Identifier);
+            return result;
+        };
+
         // Check WINGET_CACHE_PATH environment variable first
-        DWORD envValueLen = GetEnvironmentVariableW(L"WINGET_CACHE_PATH", nullptr, 0);
+        DWORD envValueLen = GetEnvironmentVariableW(anon::s_CachePathEnvVarW.data(), nullptr, 0);
         if (envValueLen > 0)
         {
             std::wstring envValue(envValueLen - 1, L'\0');
-            DWORD writtenLen = GetEnvironmentVariableW(L"WINGET_CACHE_PATH", &envValue[0], envValueLen);
+            DWORD writtenLen = GetEnvironmentVariableW(anon::s_CachePathEnvVarW.data(), &envValue[0], envValueLen);
             if (writtenLen > 0)
             {
                 auto expanded = Filesystem::GetExpandedPath(Utility::ConvertToUTF8(envValue));
                 if (!expanded.empty() && expanded.is_absolute())
                 {
-                    std::filesystem::path result = expanded;
-                    result /= anon::GetNameForType(Type);
-                    result /= Utility::ConvertToUTF16(Identifier);
-                    return result;
+                    return buildCachePath(expanded);
                 }
             }
         }
@@ -164,18 +169,13 @@ namespace AppInstaller::Caching
         std::filesystem::path settingPath = Settings::User().Get<Settings::Setting::CachePath>();
         if (!settingPath.empty())
         {
-            std::filesystem::path result = settingPath;
-            result /= anon::GetNameForType(Type);
-            result /= Utility::ConvertToUTF16(Identifier);
-            return result;
+            return buildCachePath(settingPath);
         }
 
         // Fall back to default: Temp / "cache" / type / identifier
-        std::filesystem::path result = Runtime::GetPathTo(BasePath);
-        result /= "cache";
-        result /= anon::GetNameForType(Type);
-        result /= Utility::ConvertToUTF16(Identifier);
-        return result;
+        std::filesystem::path defaultRoot = Runtime::GetPathTo(BasePath);
+        defaultRoot /= "cache";
+        return buildCachePath(defaultRoot);
     }
 
     FileCache::FileCache(Type type, std::string identifier, std::vector<std::string> sources) :
