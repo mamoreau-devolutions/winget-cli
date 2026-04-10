@@ -4,7 +4,10 @@
 #include "Public/winget/FileCache.h"
 #include <AppInstallerDownloader.h>
 #include <AppInstallerLogging.h>
+#include <AppInstallerRuntime.h>
 #include <AppInstallerStrings.h>
+#include <winget/Filesystem.h>
+#include <winget/UserSettings.h>
 
 namespace AppInstaller::Caching
 {
@@ -138,6 +141,36 @@ namespace AppInstaller::Caching
 
     std::filesystem::path FileCache::Details::GetCachePath() const
     {
+        // Check WINGET_CACHE_PATH environment variable first
+        DWORD envValueLen = GetEnvironmentVariableW(L"WINGET_CACHE_PATH", nullptr, 0);
+        if (envValueLen > 0)
+        {
+            std::wstring envValue(envValueLen - 1, L'\0');
+            DWORD writtenLen = GetEnvironmentVariableW(L"WINGET_CACHE_PATH", &envValue[0], envValueLen);
+            if (writtenLen > 0)
+            {
+                auto expanded = Filesystem::GetExpandedPath(Utility::ConvertToUTF8(envValue));
+                if (!expanded.empty() && expanded.is_absolute())
+                {
+                    std::filesystem::path result = expanded;
+                    result /= anon::GetNameForType(Type);
+                    result /= Utility::ConvertToUTF16(Identifier);
+                    return result;
+                }
+            }
+        }
+
+        // Check the CachePath setting
+        std::filesystem::path settingPath = Settings::User().Get<Settings::Setting::CachePath>();
+        if (!settingPath.empty())
+        {
+            std::filesystem::path result = settingPath;
+            result /= anon::GetNameForType(Type);
+            result /= Utility::ConvertToUTF16(Identifier);
+            return result;
+        }
+
+        // Fall back to default: Temp / "cache" / type / identifier
         std::filesystem::path result = Runtime::GetPathTo(BasePath);
         result /= "cache";
         result /= anon::GetNameForType(Type);

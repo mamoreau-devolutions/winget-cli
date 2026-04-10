@@ -407,6 +407,16 @@ namespace AppInstaller::Settings
             return ValidatePathValue(value);
         }
 
+        WINGET_VALIDATE_SIGNATURE(CachePath)
+        {
+            auto expanded = GetExpandedPath(value);
+            if (expanded.empty() || !expanded.is_absolute())
+            {
+                return {};
+            }
+            return expanded;
+        }
+
         WINGET_VALIDATE_SIGNATURE(NetworkDownloader)
         {
             static constexpr std::string_view s_downloader_default = "default";
