@@ -146,9 +146,11 @@ namespace TestCommon
     struct TestSourceReference : public AppInstaller::Repository::ISourceReference
     {
         using OpenFunctor = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(const AppInstaller::Repository::SourceDetails&)>;
+        using OpenFunctorMutable = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(AppInstaller::Repository::SourceDetails&)>;
         using OpenFunctorWithCustomHeader = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(const AppInstaller::Repository::SourceDetails&, std::optional<std::string>)>;
 
         TestSourceReference(const AppInstaller::Repository::SourceDetails& details, OpenFunctor open) : m_details(details), m_onOpen(open) {}
+        TestSourceReference(const AppInstaller::Repository::SourceDetails& details, OpenFunctorMutable open) : m_details(details), m_onOpenMutable(open) {}
         TestSourceReference(const AppInstaller::Repository::SourceDetails& details, OpenFunctorWithCustomHeader open) : m_details(details), m_onOpenWithCustomHeader(open) {}
 
         std::string GetIdentifier() override { return m_details.Identifier; }
@@ -166,6 +168,10 @@ namespace TestCommon
             {
                 return m_onOpenWithCustomHeader(m_details, m_header);
             }
+            else if (m_onOpenMutable)
+            {
+                return m_onOpenMutable(m_details);
+            }
             else
             {
                 return m_onOpen(m_details);
@@ -175,6 +181,7 @@ namespace TestCommon
     private:
         AppInstaller::Repository::SourceDetails m_details;
         OpenFunctor m_onOpen;
+        OpenFunctorMutable m_onOpenMutable;
         OpenFunctorWithCustomHeader m_onOpenWithCustomHeader;
         std::optional<std::string> m_header;
     };
@@ -183,6 +190,7 @@ namespace TestCommon
     struct TestSourceFactory : public AppInstaller::Repository::ISourceFactory
     {
         using OpenFunctor = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(const AppInstaller::Repository::SourceDetails&)>;
+        using OpenFunctorMutable = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(AppInstaller::Repository::SourceDetails&)>;
         using OpenFunctorWithCustomHeader = std::function<std::shared_ptr<AppInstaller::Repository::ISource>(const AppInstaller::Repository::SourceDetails&, std::optional<std::string>)>;
         using AddFunctor = std::function<void(AppInstaller::Repository::SourceDetails&)>;
         using UpdateFunctor = std::function<void(const AppInstaller::Repository::SourceDetails&)>;
@@ -203,6 +211,7 @@ namespace TestCommon
 
         bool ShouldUpdateBeforeOpenResult = false;
         OpenFunctor OnOpen;
+        OpenFunctorMutable OnOpenMutable;
         OpenFunctorWithCustomHeader OnOpenWithCustomHeader;
         AddFunctor OnAdd;
         UpdateFunctor OnUpdate;

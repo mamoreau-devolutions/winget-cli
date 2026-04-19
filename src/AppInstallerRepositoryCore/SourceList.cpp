@@ -33,6 +33,7 @@ namespace AppInstaller::Repository
         constexpr std::string_view s_MetadataYaml_Source_Name = "Name"sv;
         constexpr std::string_view s_MetadataYaml_Source_LastUpdate = "LastUpdate"sv;
         constexpr std::string_view s_MetadataYaml_Source_DoNotUpdateBefore = "DoNotUpdateBefore"sv;
+        constexpr std::string_view s_MetadataYaml_Source_PackageOpenVerifyToken = "PackageOpenVerifyToken"sv;
         constexpr std::string_view s_MetadataYaml_Source_AcceptedAgreementsIdentifier = "AcceptedAgreementsIdentifier"sv;
         constexpr std::string_view s_MetadataYaml_Source_AcceptedAgreementFields = "AcceptedAgreementFields"sv;
 
@@ -230,6 +231,11 @@ namespace AppInstaller::Repository
             target.DoNotUpdateBefore = DoNotUpdateBefore;
         }
 
+        if (!PackageOpenVerifyToken.empty())
+        {
+            target.PackageOpenVerifyToken = PackageOpenVerifyToken;
+        }
+
         target.AcceptedAgreementFields = AcceptedAgreementFields;
         target.AcceptedAgreementsIdentifier = AcceptedAgreementsIdentifier;
     }
@@ -238,6 +244,7 @@ namespace AppInstaller::Repository
     {
         LastUpdateTime = source.LastUpdateTime;
         DoNotUpdateBefore = source.DoNotUpdateBefore;
+        PackageOpenVerifyToken = source.PackageOpenVerifyToken;
     }
 
     void SourceDetailsInternal::CopyOverrideFieldsFrom(const SourceDetails& overrideSource)
@@ -938,6 +945,7 @@ namespace AppInstaller::Repository
                     details.DoNotUpdateBefore = Utility::ConvertUnixEpochToSystemClock(doNotUpdateBeforeInEpoch);
                 }
 
+                TryReadScalar(name, settingValue, source, s_MetadataYaml_Source_PackageOpenVerifyToken, details.PackageOpenVerifyToken, false);
                 TryReadScalar(name, settingValue, source, s_MetadataYaml_Source_AcceptedAgreementsIdentifier, details.AcceptedAgreementsIdentifier, false);
                 TryReadScalar(name, settingValue, source, s_MetadataYaml_Source_AcceptedAgreementFields, details.AcceptedAgreementFields, false);
                 return true;
@@ -957,6 +965,7 @@ namespace AppInstaller::Repository
             out << YAML::Key << s_MetadataYaml_Source_Name << YAML::Value << details.Name;
             out << YAML::Key << s_MetadataYaml_Source_LastUpdate << YAML::Value << Utility::ConvertSystemClockToUnixEpoch(details.LastUpdateTime);
             out << YAML::Key << s_MetadataYaml_Source_DoNotUpdateBefore << YAML::Value << Utility::ConvertSystemClockToUnixEpoch(details.DoNotUpdateBefore);
+            out << YAML::Key << s_MetadataYaml_Source_PackageOpenVerifyToken << YAML::Value << details.PackageOpenVerifyToken;
             out << YAML::Key << s_MetadataYaml_Source_AcceptedAgreementsIdentifier << YAML::Value << details.AcceptedAgreementsIdentifier;
             out << YAML::Key << s_MetadataYaml_Source_AcceptedAgreementFields << YAML::Value << details.AcceptedAgreementFields;
             out << YAML::EndMap;

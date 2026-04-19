@@ -143,6 +143,9 @@ namespace AppInstaller::Repository
         // Stores the earliest time that a background update should be attempted.
         std::chrono::system_clock::time_point DoNotUpdateBefore = {};
 
+        // Internal metadata token for the last successfully verified source package.
+        std::string PackageOpenVerifyToken;
+
         // Whether the source supports InstalledSource correlation.
         bool SupportInstalledSearchCorrelation = true;
 

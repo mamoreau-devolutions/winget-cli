@@ -360,6 +360,35 @@ namespace AppInstaller::Repository::Microsoft
             return result;
         }
 
+        std::string GetDesktopPackageVerifyToken(const std::filesystem::path& packagePath)
+        {
+            Msix::MsixInfo packageInfo{ packagePath };
+            return Utility::ConvertToUTF8(packageInfo.GetDigest());
+        }
+
+        bool ShouldVerifyPackagedContextSource(const SourceDetails& details, std::string_view packageFullName)
+        {
+            return details.PackageOpenVerifyToken.empty() || details.PackageOpenVerifyToken != packageFullName;
+        }
+
+        bool ShouldVerifyDesktopContextSource(const SourceDetails& details, const std::filesystem::path& packagePath)
+        {
+            if (details.PackageOpenVerifyToken.empty())
+            {
+                return true;
+            }
+
+            try
+            {
+                return details.PackageOpenVerifyToken != GetDesktopPackageVerifyToken(packagePath);
+            }
+            catch (...)
+            {
+                LOG_CAUGHT_EXCEPTION_MSG("Failed to evaluate desktop source verification token");
+                return true;
+            }
+        }
+
         std::optional<Msix::PackageVersion> DesktopContextGetCurrentVersion(const SourceDetails& details)
         {
             std::filesystem::path packageState = GetStatePathFromDetails(details);
@@ -367,9 +396,16 @@ namespace AppInstaller::Repository::Microsoft
 
             if (std::filesystem::exists(packagePath))
             {
-                // If we already have a trusted index package, use it to determine if we need to update or not.
-                Msix::WriteLockedMsixFile indexPackage{ packagePath };
-                if (indexPackage.ValidateTrustInfo(WI_IsFlagSet(details.TrustLevel, SourceTrustLevel::StoreOrigin)))
+                bool trustValidated = !ShouldVerifyDesktopContextSource(details, packagePath);
+
+                if (!trustValidated)
+                {
+                    // If we already have a trusted index package, use it to determine if we need to update or not.
+                    Msix::WriteLockedMsixFile indexPackage{ packagePath };
+                    trustValidated = indexPackage.ValidateTrustInfo(WI_IsFlagSet(details.TrustLevel, SourceTrustLevel::StoreOrigin));
+                }
+
+                if (trustValidated)
                 {
                     Msix::MsixInfo msixInfo{ packagePath };
                     auto manifest = msixInfo.GetAppPackageManifests();
@@ -428,7 +464,19 @@ namespace AppInstaller::Repository::Microsoft
 
             bool ShouldUpdateBeforeOpen(const std::optional<TimeSpan>& requestedUpdateInterval) override
             {
-                return CheckForUpdateBeforeOpen(m_details, PackagedContextGetCurrentVersion(m_details), requestedUpdateInterval);
+                auto currentVersionStart = std::chrono::steady_clock::now();
+                auto currentVersion = PackagedContextGetCurrentVersion(m_details);
+                auto currentVersionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - currentVersionStart);
+
+                AICLI_LOG(Repo, Info, << "PackagedContextGetCurrentVersion for source `" << m_details.Name << "` completed after " << currentVersionDuration.count() << " ms; version found=[" << static_cast<bool>(currentVersion) << "]");
+
+                auto checkForUpdateStart = std::chrono::steady_clock::now();
+                bool result = CheckForUpdateBeforeOpen(m_details, currentVersion, requestedUpdateInterval);
+                auto checkForUpdateDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - checkForUpdateStart);
+
+                AICLI_LOG(Repo, Info, << "CheckForUpdateBeforeOpen for source `" << m_details.Name << "` completed after " << checkForUpdateDuration.count() << " ms; result=[" << result << "]");
+
+                return result;
             }
 
             std::shared_ptr<ISource> Open(IProgressCallback& progress) override
@@ -439,14 +487,32 @@ namespace AppInstaller::Repository::Microsoft
                     return {};
                 }
 
+                auto getExtensionStart = std::chrono::steady_clock::now();
                 auto extension = GetExtensionFromDetails(m_details);
+                auto getExtensionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - getExtensionStart);
+                AICLI_LOG(Repo, Info, << "GetExtensionFromDetails during open for source `" << m_details.Name << "` completed after " << getExtensionDuration.count() << " ms");
+
                 if (!extension)
                 {
                     AICLI_LOG(Repo, Info, << "Package not found " << m_details.Data);
                     THROW_HR(APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING);
                 }
 
-                THROW_HR_IF(HRESULT_FROM_WIN32(ERROR_NEEDS_REMEDIATION), !extension->VerifyContentIntegrity(progress));
+                auto currentPackageFullName = Msix::GetPackageFullNameFromFamilyName(GetPackageFamilyNameFromDetails(m_details));
+                THROW_HR_IF(APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, !currentPackageFullName);
+
+                if (ShouldVerifyPackagedContextSource(m_details, *currentPackageFullName))
+                {
+                    auto verifyIntegrityStart = std::chrono::steady_clock::now();
+                    THROW_HR_IF(HRESULT_FROM_WIN32(ERROR_NEEDS_REMEDIATION), !extension->VerifyContentIntegrity(progress));
+                    auto verifyIntegrityDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - verifyIntegrityStart);
+                    AICLI_LOG(Repo, Info, << "VerifyContentIntegrity for source `" << m_details.Name << "` completed after " << verifyIntegrityDuration.count() << " ms");
+                    m_details.PackageOpenVerifyToken = *currentPackageFullName;
+                }
+                else
+                {
+                    AICLI_LOG(Repo, Info, << "Skipping VerifyContentIntegrity for source `" << m_details.Name << "`; package token unchanged");
+                }
 
                 // To work around an issue with accessing the public folder, we are temporarily
                 // constructing the location ourself.  This was already the case for the non-packaged
@@ -455,12 +521,21 @@ namespace AppInstaller::Repository::Microsoft
                 std::filesystem::path indexLocation = extension->GetPackagePath();
                 indexLocation /= s_PreIndexedPackageSourceFactory_IndexFilePath;
 
+                auto openIndexStart = std::chrono::steady_clock::now();
                 SQLiteIndex index = SQLiteIndex::Open(indexLocation.u8string(), SQLiteIndex::OpenDisposition::Immutable);
+                auto openIndexDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - openIndexStart);
+                AICLI_LOG(Repo, Info, << "SQLiteIndex::Open for source `" << m_details.Name << "` completed after " << openIndexDuration.count() << " ms");
 
                 // We didn't use to store the source identifier, so we compute it here in case it's
                 // missing from the details.
                 m_details.Identifier = GetPackageFamilyNameFromDetails(m_details);
-                return std::make_shared<SQLiteIndexSource>(m_details, std::move(index), false, true);
+
+                auto createSourceStart = std::chrono::steady_clock::now();
+                auto result = std::make_shared<SQLiteIndexSource>(m_details, std::move(index), false, true);
+                auto createSourceDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - createSourceStart);
+                AICLI_LOG(Repo, Info, << "SQLiteIndexSource construction for source `" << m_details.Name << "` completed after " << createSourceDuration.count() << " ms");
+
+                return result;
             }
 
         private:
@@ -516,6 +591,8 @@ namespace AppInstaller::Repository::Microsoft
                     THROW_HR(APPINSTALLER_CLI_ERROR_SOURCE_DATA_INTEGRITY_FAILURE);
                 }
 
+                const_cast<SourceDetails&>(details).PackageOpenVerifyToken = localMsixInfo.GetPackageFullName();
+
                 winrt::Windows::Foundation::Uri uri = winrt::Windows::Foundation::Uri(localFile.c_str());
                 Deployment::AddPackage(
                     uri,
@@ -569,7 +646,19 @@ namespace AppInstaller::Repository::Microsoft
 
             bool ShouldUpdateBeforeOpen(const std::optional<TimeSpan>& requestedUpdateInterval) override
             {
-                return CheckForUpdateBeforeOpen(m_details, DesktopContextGetCurrentVersion(m_details), requestedUpdateInterval);
+                auto currentVersionStart = std::chrono::steady_clock::now();
+                auto currentVersion = DesktopContextGetCurrentVersion(m_details);
+                auto currentVersionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - currentVersionStart);
+
+                AICLI_LOG(Repo, Info, << "DesktopContextGetCurrentVersion for source `" << m_details.Name << "` completed after " << currentVersionDuration.count() << " ms; version found=[" << static_cast<bool>(currentVersion) << "]");
+
+                auto checkForUpdateStart = std::chrono::steady_clock::now();
+                bool result = CheckForUpdateBeforeOpen(m_details, currentVersion, requestedUpdateInterval);
+                auto checkForUpdateDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - checkForUpdateStart);
+
+                AICLI_LOG(Repo, Info, << "Desktop CheckForUpdateBeforeOpen for source `" << m_details.Name << "` completed after " << checkForUpdateDuration.count() << " ms; result=[" << result << "]");
+
+                return result;
             }
 
             std::shared_ptr<ISource> Open(IProgressCallback& progress) override
@@ -592,16 +681,32 @@ namespace AppInstaller::Repository::Microsoft
                 // Put a write exclusive lock on the index package.
                 Msix::WriteLockedMsixFile indexPackage{ packageLocation };
 
-                // Validate index package trust info.
-                THROW_HR_IF(APPINSTALLER_CLI_ERROR_SOURCE_DATA_INTEGRITY_FAILURE, !indexPackage.ValidateTrustInfo(WI_IsFlagSet(m_details.TrustLevel, SourceTrustLevel::StoreOrigin)));
+                if (ShouldVerifyDesktopContextSource(m_details, packageLocation))
+                {
+                    auto validateTrustStart = std::chrono::steady_clock::now();
+                    THROW_HR_IF(APPINSTALLER_CLI_ERROR_SOURCE_DATA_INTEGRITY_FAILURE, !indexPackage.ValidateTrustInfo(WI_IsFlagSet(m_details.TrustLevel, SourceTrustLevel::StoreOrigin)));
+                    auto validateTrustDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - validateTrustStart);
+                    AICLI_LOG(Repo, Info, << "Desktop ValidateTrustInfo for source `" << m_details.Name << "` completed after " << validateTrustDuration.count() << " ms");
+                    m_details.PackageOpenVerifyToken = GetDesktopPackageVerifyToken(packageLocation);
+                }
+                else
+                {
+                    AICLI_LOG(Repo, Info, << "Skipping desktop ValidateTrustInfo for source `" << m_details.Name << "`; package token unchanged");
+                }
 
                 // Create a temp lock exclusive index file.
+                auto createTempFileStart = std::chrono::steady_clock::now();
                 auto tempIndexFilePath = Runtime::GetNewTempFilePath();
                 auto tempIndexFile = Utility::ManagedFile::CreateWriteLockedFile(tempIndexFilePath, GENERIC_WRITE, true);
+                auto createTempFileDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - createTempFileStart);
+                AICLI_LOG(Repo, Info, << "Desktop temp index file creation for source `" << m_details.Name << "` completed after " << createTempFileDuration.count() << " ms");
 
                 // Populate temp index file.
+                auto populateTempFileStart = std::chrono::steady_clock::now();
                 Msix::MsixInfo packageInfo(packageLocation);
                 packageInfo.WriteToFileHandle(s_PreIndexedPackageSourceFactory_IndexFilePath, tempIndexFile.GetFileHandle(), progress);
+                auto populateTempFileDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - populateTempFileStart);
+                AICLI_LOG(Repo, Info, << "Desktop WriteToFileHandle for source `" << m_details.Name << "` completed after " << populateTempFileDuration.count() << " ms");
 
                 if (progress.IsCancelledBy(CancelReason::Any))
                 {
@@ -609,12 +714,21 @@ namespace AppInstaller::Repository::Microsoft
                     return {};
                 }
 
+                auto openIndexStart = std::chrono::steady_clock::now();
                 SQLiteIndex index = SQLiteIndex::Open(tempIndexFile.GetFilePath().u8string(), SQLiteIndex::OpenDisposition::Immutable, std::move(tempIndexFile));
+                auto openIndexDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - openIndexStart);
+                AICLI_LOG(Repo, Info, << "Desktop SQLiteIndex::Open for source `" << m_details.Name << "` completed after " << openIndexDuration.count() << " ms");
 
                 // We didn't use to store the source identifier, so we compute it here in case it's
                 // missing from the details.
                 m_details.Identifier = GetPackageFamilyNameFromDetails(m_details);
-                return std::make_shared<SQLiteIndexSource>(m_details, std::move(index), false, true);
+
+                auto createSourceStart = std::chrono::steady_clock::now();
+                auto result = std::make_shared<SQLiteIndexSource>(m_details, std::move(index), false, true);
+                auto createSourceDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - createSourceStart);
+                AICLI_LOG(Repo, Info, << "Desktop SQLiteIndexSource construction for source `" << m_details.Name << "` completed after " << createSourceDuration.count() << " ms");
+
+                return result;
             }
 
         private:
@@ -688,6 +802,8 @@ namespace AppInstaller::Repository::Microsoft
                         AICLI_LOG(Repo, Error, << "Source update failed. Source package failed trust validation.");
                         THROW_HR(APPINSTALLER_CLI_ERROR_SOURCE_DATA_INTEGRITY_FAILURE);
                     }
+
+                    const_cast<SourceDetails&>(details).PackageOpenVerifyToken = GetDesktopPackageVerifyToken(tempPackagePath);
                 }
 
                 std::filesystem::rename(tempPackagePath, packagePath);

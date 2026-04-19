@@ -789,6 +789,21 @@ namespace AppInstaller::Repository
 
         std::vector<SourceDetails> result;
 
+        auto saveOpenMetadataIfNeeded = [&](const SourceDetails& beforeOpen, const SourceDetails& afterOpen)
+            {
+                if (beforeOpen.PackageOpenVerifyToken == afterOpen.PackageOpenVerifyToken)
+                {
+                    return;
+                }
+
+                SourceList sourceList;
+                if (auto detailsInternal = sourceList.GetSource(afterOpen.Name))
+                {
+                    detailsInternal->CopyMetadataFieldsFrom(afterOpen);
+                    sourceList.SaveMetadata(*detailsInternal);
+                }
+            };
+
         if (!m_source)
         {
             std::vector<std::shared_ptr<ISourceReference>>* sourceReferencesToOpen = nullptr;
@@ -810,7 +825,13 @@ namespace AppInstaller::Repository
                 // Check for updates before opening.
                 for (auto& sourceReference : m_sourceReferences)
                 {
-                    if (ShouldUpdateBeforeOpen(sourceReference.get(), m_backgroundUpdateInterval))
+                    auto shouldUpdateStart = std::chrono::steady_clock::now();
+                    bool shouldUpdate = ShouldUpdateBeforeOpen(sourceReference.get(), m_backgroundUpdateInterval);
+                    auto shouldUpdateDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - shouldUpdateStart);
+
+                    AICLI_LOG(Repo, Info, << "ShouldUpdateBeforeOpen for source `" << sourceReference->GetDetails().Name << "` returned [" << shouldUpdate << "] after " << shouldUpdateDuration.count() << " ms");
+
+                    if (shouldUpdate)
                     {
                         auto& details = sourceReference->GetDetails();
 
@@ -818,7 +839,11 @@ namespace AppInstaller::Repository
                         {
                             // TODO: Consider adding a context callback to indicate we are doing the same action
                             // to avoid the progress bar fill up multiple times.
+                            auto backgroundUpdateStart = std::chrono::steady_clock::now();
                             AddOrUpdateResult updateResult = BackgroundUpdateSourceFromDetails(details, progress);
+                            auto backgroundUpdateDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - backgroundUpdateStart);
+
+                            AICLI_LOG(Repo, Info, << "BackgroundUpdateSourceFromDetails for source `" << details.Name << "` completed after " << backgroundUpdateDuration.count() << " ms; UpdateChecked=[" << updateResult.UpdateChecked << "], MetadataWritten=[" << updateResult.MetadataWritten << "]");
 
                             if (updateResult.MetadataWritten)
                             {
@@ -860,10 +885,14 @@ namespace AppInstaller::Repository
                 {
                     AICLI_LOG(Repo, Info, << "Adding to aggregated source: " << sourceReference->GetDetails().Name);
 
+                    SourceDetails detailsBeforeOpen = sourceReference->GetDetails();
+
                     try
 
                     {
-                        aggregatedSource->AddAvailableSource(sourceReference->Open(progress));
+                        auto openedSource = sourceReference->Open(progress);
+                        saveOpenMetadataIfNeeded(detailsBeforeOpen, sourceReference->GetDetails());
+                        aggregatedSource->AddAvailableSource(std::move(openedSource));
                     }
                     catch (...)
                     {
@@ -886,7 +915,9 @@ namespace AppInstaller::Repository
             }
             else
             {
+                SourceDetails detailsBeforeOpen = (*sourceReferencesToOpen)[0]->GetDetails();
                 m_source = (*sourceReferencesToOpen)[0]->Open(progress);
+                saveOpenMetadataIfNeeded(detailsBeforeOpen, (*sourceReferencesToOpen)[0]->GetDetails());
             }
         }
 

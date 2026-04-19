@@ -361,6 +361,38 @@ TEST_CASE("RepoSources_SingleSource", "[sources]")
     RequireDefaultSourcesAt(sources, 1);
 }
 
+TEST_CASE("RepoSources_OpenPersistsPackageOpenVerifyToken", "[sources]")
+{
+    SetSetting(Stream::UserSources, s_SingleSource);
+    RemoveSetting(Stream::SourcesMetadata);
+
+    constexpr std::string_view verifyToken = "open-token"sv;
+
+    TestHook_ClearSourceFactoryOverrides();
+    TestSourceFactory factory{ SourcesTestSource::Create };
+    factory.OnOpenMutable = [](SourceDetails& details)
+        {
+            details.PackageOpenVerifyToken = verifyToken;
+            return SourcesTestSource::Create(details);
+        };
+    TestHook_SetSourceFactoryOverride("testType", factory);
+
+    ProgressCallback progress;
+    auto source = OpenSource("testName", progress);
+    REQUIRE(source);
+
+    auto sources = GetSources();
+    REQUIRE(sources.size() == c_DefaultSourceCount + 1);
+    REQUIRE(sources[0].Name == "testName");
+    REQUIRE(sources[0].PackageOpenVerifyToken == verifyToken);
+
+    std::ifstream metadataFile{ GetPathTo(Stream::SourcesMetadata) };
+    REQUIRE(metadataFile);
+
+    std::string metadataContents{ std::istreambuf_iterator<char>{ metadataFile }, std::istreambuf_iterator<char>{} };
+    REQUIRE(metadataContents.find("PackageOpenVerifyToken: open-token") != std::string::npos);
+}
+
 TEST_CASE("RepoSources_SingleSource_AllProperties", "[sources]")
 {
     SetSetting(Stream::UserSources, s_SingleSource_AllProperties);

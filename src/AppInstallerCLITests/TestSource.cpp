@@ -444,6 +444,10 @@ namespace TestCommon
         {
             result = std::make_shared<TestSourceReference>(details, OnOpenWithCustomHeader);
         }
+        else if (OnOpenMutable)
+        {
+            result = std::make_shared<TestSourceReference>(details, OnOpenMutable);
+        }
         else
         {
             result = std::make_shared<TestSourceReference>(details, OnOpen);
