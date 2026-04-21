@@ -201,6 +201,12 @@ enum MatchLocator {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchSemantics {
+    Many,
+    Single,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RestInfoCache {
     expires_at: DateTime<Utc>,
@@ -281,7 +287,7 @@ impl Repository {
     }
 
     pub fn search(&mut self, query: &PackageQuery) -> Result<SearchResponse> {
-        let (matches, warnings) = self.search_located(query)?;
+        let (matches, warnings) = self.search_located(query, SearchSemantics::Many)?;
         Ok(SearchResponse {
             matches: matches.into_iter().map(|item| item.display).collect(),
             warnings,
@@ -322,7 +328,7 @@ impl Repository {
     }
 
     fn find_single_match(&mut self, query: &PackageQuery) -> Result<(LocatedMatch, Vec<String>)> {
-        let (matches, warnings) = self.search_located(query)?;
+        let (matches, warnings) = self.search_located(query, SearchSemantics::Single)?;
 
         if matches.is_empty() {
             bail!("no package matched the supplied query");
@@ -346,13 +352,17 @@ impl Repository {
         Ok((matches.into_iter().next().expect("one match"), warnings))
     }
 
-    fn search_located(&mut self, query: &PackageQuery) -> Result<(Vec<LocatedMatch>, Vec<String>)> {
+    fn search_located(
+        &mut self,
+        query: &PackageQuery,
+        semantics: SearchSemantics,
+    ) -> Result<(Vec<LocatedMatch>, Vec<String>)> {
         let indexes = self.resolve_source_indexes(query.source.as_deref())?;
         let mut matches = Vec::new();
         let mut warnings = Vec::new();
 
         for index in indexes {
-            match self.search_source(index, query) {
+            match self.search_source(index, query, semantics) {
                 Ok(mut source_matches) => matches.append(&mut source_matches),
                 Err(error) => warnings.push(format!("{}: {error:#}", self.store.sources[index].name)),
             }
@@ -365,10 +375,11 @@ impl Repository {
         &mut self,
         source_index: usize,
         query: &PackageQuery,
+        semantics: SearchSemantics,
     ) -> Result<Vec<LocatedMatch>> {
         match self.store.sources[source_index].kind {
-            SourceKind::PreIndexed => self.search_preindexed(source_index, query),
-            SourceKind::Rest => self.search_rest(source_index, query),
+            SourceKind::PreIndexed => self.search_preindexed(source_index, query, semantics),
+            SourceKind::Rest => self.search_rest(source_index, query, semantics),
         }
     }
 
@@ -496,11 +507,12 @@ impl Repository {
         &mut self,
         source_index: usize,
         query: &PackageQuery,
+        semantics: SearchSemantics,
     ) -> Result<Vec<LocatedMatch>> {
         let connection = self.open_preindexed_connection(source_index)?;
         let source = self.source_clone(source_index);
 
-        match query_v2_matches(&connection, query) {
+        match query_v2_matches(&connection, query, semantics) {
             Ok(rows) => Ok(rows
                 .into_iter()
                 .map(|row| LocatedMatch {
@@ -521,7 +533,7 @@ impl Repository {
                 })
                 .collect()),
             Err(error) if can_fallback_to_v1(&error) => {
-                let rows = query_v1_matches(&connection, query)?;
+                let rows = query_v1_matches(&connection, query, semantics)?;
                 let grouped = group_v1_rows(rows);
 
                 Ok(grouped
@@ -551,6 +563,7 @@ impl Repository {
         &mut self,
         source_index: usize,
         query: &PackageQuery,
+        semantics: SearchSemantics,
     ) -> Result<Vec<LocatedMatch>> {
         let source = self.source_clone(source_index);
         let info = self.load_rest_information(source_index)?;
@@ -558,7 +571,7 @@ impl Repository {
             .ok_or_else(|| anyhow!("no compatible REST contract for {}", source.name))?;
 
         let url = format!("{}/manifestSearch", source.arg.trim_end_matches('/'));
-        let body = build_rest_search_body(query, &info)?;
+        let body = build_rest_search_body(query, &info, semantics)?;
         let response = self
             .client
             .post(url)
@@ -1158,8 +1171,12 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     result
 }
 
-fn query_v2_matches(connection: &Connection, query: &PackageQuery) -> Result<Vec<V2SearchRow>> {
-    let (where_clause, params) = build_preindexed_where_clause(query, true);
+fn query_v2_matches(
+    connection: &Connection,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+) -> Result<Vec<V2SearchRow>> {
+    let (where_clause, params) = build_preindexed_where_clause(query, true, semantics);
     let sql = format!(
         "SELECT rowid, id, name, moniker, latest_version, hash \
          FROM packages WHERE {where_clause} LIMIT 50"
@@ -1181,8 +1198,12 @@ fn query_v2_matches(connection: &Connection, query: &PackageQuery) -> Result<Vec
     )
 }
 
-fn query_v1_matches(connection: &Connection, query: &PackageQuery) -> Result<Vec<V1SearchRow>> {
-    let (where_clause, params) = build_preindexed_where_clause(query, false);
+fn query_v1_matches(
+    connection: &Connection,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+) -> Result<Vec<V1SearchRow>> {
+    let (where_clause, params) = build_preindexed_where_clause(query, false, semantics);
     let sql = format!(
         "SELECT manifest.id, versions.version, channels.channel, ids.id, names.name, monikers.moniker \
          FROM manifest \
@@ -1311,7 +1332,11 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
     Ok(false)
 }
 
-fn build_preindexed_where_clause(query: &PackageQuery, v2: bool) -> (String, Vec<String>) {
+fn build_preindexed_where_clause(
+    query: &PackageQuery,
+    v2: bool,
+    semantics: SearchSemantics,
+) -> (String, Vec<String>) {
     let moniker_column = if v2 {
         "moniker"
     } else {
@@ -1319,18 +1344,19 @@ fn build_preindexed_where_clause(query: &PackageQuery, v2: bool) -> (String, Vec
     };
     let id_column = if v2 { "id" } else { "ids.id" };
     let name_column = if v2 { "name" } else { "names.name" };
+    let exact_match = query.exact || semantics == SearchSemantics::Single;
 
     if let Some(value) = &query.id {
-        return single_field_where(id_column, value, query.exact);
+        return single_field_where(id_column, value, exact_match);
     }
     if let Some(value) = &query.name {
-        return single_field_where(name_column, value, query.exact);
+        return single_field_where(name_column, value, exact_match);
     }
     if let Some(value) = &query.moniker {
-        return single_field_where(moniker_column, value, query.exact);
+        return single_field_where(moniker_column, value, exact_match);
     }
     if let Some(value) = &query.query {
-        if query.exact {
+        if exact_match {
             let sql =
                 format!("({id_column} LIKE ?1 OR {name_column} LIKE ?2 OR {moniker_column} LIKE ?3)");
             return (sql, vec![value.clone(), value.clone(), value.clone()]);
@@ -1353,30 +1379,56 @@ fn single_field_where(column: &str, value: &str, exact: bool) -> (String, Vec<St
     }
 }
 
-fn build_rest_search_body(query: &PackageQuery, info: &RestInformation) -> Result<JsonValue> {
+fn build_rest_search_body(
+    query: &PackageQuery,
+    info: &RestInformation,
+    semantics: SearchSemantics,
+) -> Result<JsonValue> {
     let mut root = serde_json::Map::new();
     root.insert("MaximumResults".to_string(), JsonValue::from(50));
+    let exact_match = query.exact || semantics == SearchSemantics::Single;
 
     if let Some(value) = &query.query {
+        if semantics == SearchSemantics::Single {
+            let mut filters = vec![
+                rest_filter("PackageIdentifier", value, true),
+                rest_filter("PackageName", value, true),
+                rest_filter("Moniker", value, true),
+            ];
+            append_required_rest_filters(&mut filters, info);
+            root.insert("Filters".to_string(), JsonValue::Array(filters));
+            return Ok(JsonValue::Object(root));
+        }
+
         root.insert(
             "Query".to_string(),
             serde_json::json!({
                 "KeyWord": value,
-                "MatchType": if query.exact { "Exact" } else { "Substring" },
+                "MatchType": if exact_match { "Exact" } else { "Substring" },
             }),
         );
     }
 
     let mut filters = Vec::new();
     if let Some(value) = &query.id {
-        filters.push(rest_filter("PackageIdentifier", value, query.exact));
+        filters.push(rest_filter("PackageIdentifier", value, exact_match));
     }
     if let Some(value) = &query.name {
-        filters.push(rest_filter("PackageName", value, query.exact));
+        filters.push(rest_filter("PackageName", value, exact_match));
     }
     if let Some(value) = &query.moniker {
-        filters.push(rest_filter("Moniker", value, query.exact));
+        filters.push(rest_filter("Moniker", value, exact_match));
     }
+    append_required_rest_filters(&mut filters, info);
+
+    if !filters.is_empty() {
+        root.insert("Filters".to_string(), JsonValue::Array(filters));
+    }
+
+    Ok(JsonValue::Object(root))
+}
+
+fn append_required_rest_filters(filters: &mut Vec<JsonValue>, info: &RestInformation) {
     if info
         .required_package_match_fields
         .iter()
@@ -1384,12 +1436,6 @@ fn build_rest_search_body(query: &PackageQuery, info: &RestInformation) -> Resul
     {
         filters.push(rest_filter("Market", &default_market(), true));
     }
-
-    if !filters.is_empty() {
-        root.insert("Filters".to_string(), JsonValue::Array(filters));
-    }
-
-    Ok(JsonValue::Object(root))
 }
 
 fn rest_filter(field: &str, value: &str, exact: bool) -> JsonValue {
