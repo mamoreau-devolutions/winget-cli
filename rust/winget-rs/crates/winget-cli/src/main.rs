@@ -472,13 +472,13 @@ impl From<UpgradeArgs> for ListQuery {
 
 fn print_sources(sources: Vec<SourceRecord>) {
     println!(
-        "{:<12} {:<11} {:<30} Argument",
-        "Name", "Type", "Identifier"
+        "{:<12} {:<60} {}",
+        "Name", "Argument", "Explicit"
     );
     for source in sources {
         println!(
-            "{:<12} {:<11} {:<30} {}",
-            source.name, source.kind, source.identifier, source.arg
+            "{:<12} {:<60} {}",
+            source.name, source.arg, "false"
         );
     }
 }
@@ -993,101 +993,65 @@ fn print_error_lookup(input: &str) {
         }
     };
 
-    println!("Error code: 0x{code:08X} ({code})");
-    if let Some(description) = lookup_hresult(code) {
-        println!("Description: {description}");
+    if let Some((symbol, description)) = lookup_hresult(code) {
+        // Upstream only shows the symbol for APPINSTALLER codes (0x8A15xxxx)
+        if code & 0xFFFF0000 == 0x8A150000 {
+            println!("0x{code:08x} : {symbol}");
+        } else {
+            println!("0x{code:08x}");
+        }
+        println!("{description}");
     } else {
-        println!("No known description for this error code.");
+        println!("0x{code:08x}");
+        println!("Unknown error code");
     }
 }
 
-fn lookup_hresult(code: u32) -> Option<&'static str> {
+fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
     match code {
-        0x00000000 => Some("S_OK - Operation successful"),
-        0x80004001 => Some("E_NOTIMPL - Not implemented"),
-        0x80004002 => Some("E_NOINTERFACE - No such interface supported"),
-        0x80004003 => Some("E_POINTER - Invalid pointer"),
-        0x80004004 => Some("E_ABORT - Operation aborted"),
-        0x80004005 => Some("E_FAIL - Unspecified failure"),
-        0x80070002 => Some("E_FILENOTFOUND - The system cannot find the file specified"),
-        0x80070005 => Some("E_ACCESSDENIED - General access denied error"),
-        0x80070057 => Some("E_INVALIDARG - One or more arguments are invalid"),
-        0x8007000E => Some("E_OUTOFMEMORY - Ran out of memory"),
+        0x00000000 => Some(("S_OK", "Operation successful")),
+        0x80004001 => Some(("E_NOTIMPL", "Not implemented")),
+        0x80004002 => Some(("E_NOINTERFACE", "No such interface supported")),
+        0x80004003 => Some(("E_POINTER", "Invalid pointer")),
+        0x80004004 => Some(("E_ABORT", "Operation aborted")),
+        0x80004005 => Some(("E_FAIL", "Unspecified error")),
+        0x80070002 => Some(("E_FILENOTFOUND", "The system cannot find the file specified")),
+        0x80070005 => Some(("E_ACCESSDENIED", "General access denied error")),
+        0x80070057 => Some(("E_INVALIDARG", "One or more arguments are invalid")),
+        0x8007000E => Some(("E_OUTOFMEMORY", "Ran out of memory")),
         // winget-specific HRESULT codes
-        0x8A150001 => Some("APPINSTALLER_CLI_ERROR_INTERNAL_ERROR - Internal error"),
-        0x8A150002 => {
-            Some("APPINSTALLER_CLI_ERROR_INVALID_CL_ARGUMENTS - Invalid command line arguments")
-        }
-        0x8A150003 => Some("APPINSTALLER_CLI_ERROR_COMMAND_FAILED - Command failed"),
-        0x8A150004 => Some("APPINSTALLER_CLI_ERROR_MANIFEST_FAILED - Opening manifest failed"),
-        0x8A150005 => {
-            Some("APPINSTALLER_CLI_ERROR_BLOCKED_BY_POLICY - Operation is blocked by policy")
-        }
-        0x8A150006 => {
-            Some("APPINSTALLER_CLI_ERROR_SHELLEXEC_INSTALL_FAILED - ShellExecute install failed")
-        }
-        0x8A150007 => Some(
-            "APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION - Unsupported manifest version",
-        ),
-        0x8A150008 => Some("APPINSTALLER_CLI_ERROR_DOWNLOAD_FAILED - Download of installer failed"),
-        0x8A150009 => Some(
-            "APPINSTALLER_CLI_ERROR_CANNOT_WRITE_TO_UPLEVEL_INDEX - Cannot write to the package index",
-        ),
-        0x8A15000A => {
-            Some("APPINSTALLER_CLI_ERROR_INDEX_INTEGRITY_COMPROMISED - Index integrity compromised")
-        }
-        0x8A15000B => Some("APPINSTALLER_CLI_ERROR_SOURCES_INVALID - Sources are invalid"),
-        0x8A15000C => {
-            Some("APPINSTALLER_CLI_ERROR_SOURCE_NAME_ALREADY_EXISTS - Source name already exists")
-        }
-        0x8A15000D => Some("APPINSTALLER_CLI_ERROR_INVALID_SOURCE_TYPE - Invalid source type"),
-        0x8A15000E => Some("APPINSTALLER_CLI_ERROR_PACKAGE_IS_BUNDLE - Package is a bundle"),
-        0x8A15000F => Some("APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING - Source data is missing"),
-        0x8A150010 => {
-            Some("APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER - No applicable installer found")
-        }
-        0x8A150011 => {
-            Some("APPINSTALLER_CLI_ERROR_INSTALLER_HASH_MISMATCH - Installer hash does not match")
-        }
-        0x8A150012 => {
-            Some("APPINSTALLER_CLI_ERROR_SOURCE_NAME_DOES_NOT_EXIST - Source name does not exist")
-        }
-        0x8A150013 => Some(
-            "APPINSTALLER_CLI_ERROR_SOURCE_ARG_ALREADY_EXISTS - Source argument already exists",
-        ),
-        0x8A150014 => Some("APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND - No applications found"),
-        0x8A150015 => Some("APPINSTALLER_CLI_ERROR_NO_SOURCES_DEFINED - No sources defined"),
-        0x8A150016 => {
-            Some("APPINSTALLER_CLI_ERROR_MULTIPLE_APPLICATIONS_FOUND - Multiple applications found")
-        }
-        0x8A150017 => Some(
-            "APPINSTALLER_CLI_ERROR_NO_MANIFEST_FOUND - No manifest found matching input criteria",
-        ),
-        0x8A150019 => Some("APPINSTALLER_CLI_ERROR_NO_RANGES_PROCESSED - No ranges processed"),
-        0x8A15001A => Some(
-            "APPINSTALLER_CLI_ERROR_EXPERIMENTAL_FEATURE_DISABLED - This feature is disabled by Group Policy",
-        ),
-        0x8A15001B => Some(
-            "APPINSTALLER_CLI_ERROR_MSSTORE_BLOCKED_BY_POLICY - This feature is blocked by Group Policy",
-        ),
-        0x8A15001C => Some(
-            "APPINSTALLER_CLI_ERROR_MSSTORE_APP_BLOCKED_BY_POLICY - This Microsoft Store app is blocked by Group Policy",
-        ),
-        0x8A150022 => Some(
-            "APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE - Upgrade version is not newer than installed version",
-        ),
-        0x8A150023 => Some(
-            "APPINSTALLER_CLI_ERROR_UPDATE_ALL_HAS_FAILURE - At least one package had a failure during upgrade --all",
-        ),
-        0x8A150024 => Some(
-            "APPINSTALLER_CLI_ERROR_INSTALLER_SECURITY_CHECK_FAILED - Installer failed security check",
-        ),
-        0x8A15002B => Some(
-            "APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED - The package is already installed",
-        ),
-        0x8A150038 => Some(
-            "APPINSTALLER_CLI_ERROR_PINNED_CERTIFICATE_MISMATCH - Certificate pinning mismatch",
-        ),
+        0x8A150001 => Some(("APPINSTALLER_CLI_ERROR_INTERNAL_ERROR", "Internal error")),
+        0x8A150002 => Some(("APPINSTALLER_CLI_ERROR_INVALID_CL_ARGUMENTS", "Invalid command line arguments")),
+        0x8A150003 => Some(("APPINSTALLER_CLI_ERROR_COMMAND_FAILED", "Command failed")),
+        0x8A150004 => Some(("APPINSTALLER_CLI_ERROR_MANIFEST_FAILED", "Opening manifest failed")),
+        0x8A150005 => Some(("APPINSTALLER_CLI_ERROR_BLOCKED_BY_POLICY", "Operation is blocked by policy")),
+        0x8A150006 => Some(("APPINSTALLER_CLI_ERROR_SHELLEXEC_INSTALL_FAILED", "ShellExecute install failed")),
+        0x8A150007 => Some(("APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION", "Unsupported manifest version")),
+        0x8A150008 => Some(("APPINSTALLER_CLI_ERROR_DOWNLOAD_FAILED", "Download of installer failed")),
+        0x8A150009 => Some(("APPINSTALLER_CLI_ERROR_CANNOT_WRITE_TO_UPLEVEL_INDEX", "Cannot write to the package index")),
+        0x8A15000A => Some(("APPINSTALLER_CLI_ERROR_INDEX_INTEGRITY_COMPROMISED", "Index integrity compromised")),
+        0x8A15000B => Some(("APPINSTALLER_CLI_ERROR_SOURCES_INVALID", "Sources are invalid")),
+        0x8A15000C => Some(("APPINSTALLER_CLI_ERROR_SOURCE_NAME_ALREADY_EXISTS", "Source name already exists")),
+        0x8A15000D => Some(("APPINSTALLER_CLI_ERROR_INVALID_SOURCE_TYPE", "Invalid source type")),
+        0x8A15000E => Some(("APPINSTALLER_CLI_ERROR_PACKAGE_IS_BUNDLE", "Package is a bundle")),
+        0x8A15000F => Some(("APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING", "Source data is missing")),
+        0x8A150010 => Some(("APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER", "None of the installers are applicable for the current system")),
+        0x8A150011 => Some(("APPINSTALLER_CLI_ERROR_INSTALLER_HASH_MISMATCH", "Installer hash does not match")),
+        0x8A150012 => Some(("APPINSTALLER_CLI_ERROR_SOURCE_NAME_DOES_NOT_EXIST", "Source name does not exist")),
+        0x8A150013 => Some(("APPINSTALLER_CLI_ERROR_SOURCE_ARG_ALREADY_EXISTS", "Source argument already exists")),
+        0x8A150014 => Some(("APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND", "No applications found")),
+        0x8A150015 => Some(("APPINSTALLER_CLI_ERROR_NO_SOURCES_DEFINED", "No sources defined")),
+        0x8A150016 => Some(("APPINSTALLER_CLI_ERROR_MULTIPLE_APPLICATIONS_FOUND", "Multiple applications found")),
+        0x8A150017 => Some(("APPINSTALLER_CLI_ERROR_NO_MANIFEST_FOUND", "No manifest found matching input criteria")),
+        0x8A150019 => Some(("APPINSTALLER_CLI_ERROR_NO_RANGES_PROCESSED", "No ranges processed")),
+        0x8A15001A => Some(("APPINSTALLER_CLI_ERROR_EXPERIMENTAL_FEATURE_DISABLED", "This feature is disabled by Group Policy")),
+        0x8A15001B => Some(("APPINSTALLER_CLI_ERROR_MSSTORE_BLOCKED_BY_POLICY", "This feature is blocked by Group Policy")),
+        0x8A15001C => Some(("APPINSTALLER_CLI_ERROR_MSSTORE_APP_BLOCKED_BY_POLICY", "This Microsoft Store app is blocked by Group Policy")),
+        0x8A150022 => Some(("APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE", "Upgrade version is not newer than installed version")),
+        0x8A150023 => Some(("APPINSTALLER_CLI_ERROR_UPDATE_ALL_HAS_FAILURE", "At least one package had a failure during upgrade --all")),
+        0x8A150024 => Some(("APPINSTALLER_CLI_ERROR_INSTALLER_SECURITY_CHECK_FAILED", "Installer failed security check")),
+        0x8A15002B => Some(("APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED", "The package is already installed")),
+        0x8A150038 => Some(("APPINSTALLER_CLI_ERROR_PINNED_CERTIFICATE_MISMATCH", "Certificate pinning mismatch")),
         _ => None,
     }
 }

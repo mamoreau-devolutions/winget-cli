@@ -29,6 +29,26 @@ $defaultCases = @(
         Name = "upgrade-lazygit"
         Args = @("list", "JesseDuffield.lazygit", "--upgrade-available")
         RustArgs = @("upgrade", "JesseDuffield.lazygit")
+    },
+    @{
+        Name = "version"
+        Args = @("--version")
+        CompareMode = "exit-code-only"
+    },
+    @{
+        Name = "source-list"
+        Args = @("source", "list")
+        CompareMode = "exit-code-only"
+    },
+    @{
+        Name = "error-e-fail"
+        Args = @("error", "0x80004005")
+    },
+    @{
+        Name = "search-json"
+        Args = @("search", "Microsoft.PowerToys", "--count", "1")
+        RustArgs = @("search", "Microsoft.PowerToys", "--count", "1", "--output", "json")
+        CompareMode = "rust-only"
     }
 )
 
@@ -107,7 +127,8 @@ function Write-CaseReport {
         [Parameter(Mandatory = $true)]
         $RustResult,
         [Parameter(Mandatory = $true)]
-        $SystemResult
+        $SystemResult,
+        [string]$CompareMode = "full"
     )
 
     $commandText = ($Case.Args | ForEach-Object {
@@ -117,8 +138,13 @@ function Write-CaseReport {
                 $_
             }
         }) -join ' '
-    $sameOutput = ($RustResult.ExitCode -eq $SystemResult.ExitCode) -and
-        (@($RustResult.NormalizedLines) -join "`n") -eq (@($SystemResult.NormalizedLines) -join "`n")
+
+    if ($CompareMode -eq "exit-code-only") {
+        $sameOutput = ($RustResult.ExitCode -eq $SystemResult.ExitCode)
+    } else {
+        $sameOutput = ($RustResult.ExitCode -eq $SystemResult.ExitCode) -and
+            (@($RustResult.NormalizedLines) -join "`n") -eq (@($SystemResult.NormalizedLines) -join "`n")
+    }
 
     Write-Host ("=" * 80)
     Write-Host ("CASE   : {0}" -f $Case.Name)
@@ -152,6 +178,21 @@ $caseSet = Select-CaseSet -RequestedCases $Cases
 foreach ($case in $caseSet) {
     $rustArgs = if ($case.ContainsKey('RustArgs')) { $case.RustArgs } else { $case.Args }
     $rustResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $rustArgs
-    $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
-    Write-CaseReport -Case $case -RustResult $rustResult -SystemResult $systemResult
+    $compareMode = if ($case.ContainsKey('CompareMode')) { $case.CompareMode } else { "full" }
+
+    if ($compareMode -eq "rust-only") {
+        # Rust-only feature — just show output, no system comparison
+        Write-Host ("=" * 80)
+        Write-Host ("CASE   : {0}" -f $case.Name)
+        $commandText = ($rustArgs | ForEach-Object {
+                if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+            }) -join ' '
+        Write-Host ("COMMAND: winget {0}" -f $commandText)
+        Write-Host ("STATUS : RUST-ONLY (exit={0})" -f $rustResult.ExitCode)
+        Write-Host "--- RUST ---"
+        $rustResult.NormalizedLines | ForEach-Object { Write-Host $_ }
+    } else {
+        $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
+        Write-CaseReport -Case $case -RustResult $rustResult -SystemResult $systemResult -CompareMode $compareMode
+    }
 }
