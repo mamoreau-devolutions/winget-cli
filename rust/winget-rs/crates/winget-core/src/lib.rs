@@ -1,23 +1,27 @@
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::{Client, Response};
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
-use sha2::{Digest, Sha256};
 use rusqlite::{
     Connection, OpenFlags, Row as SqlRow, params_from_iter,
     types::{Value as SqlValue, ValueRef},
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
+#[cfg(windows)]
+use winreg::{RegKey, enums::*};
 use zip::ZipArchive;
 
 const DEFAULT_MARKET: &str = "US";
+const DEFAULT_MAX_RESULTS: usize = 50;
+const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
 const REST_SUPPORTED_CONTRACTS: &[&str] = &[
     "1.12.0", "1.10.0", "1.9.0", "1.7.0", "1.6.0", "1.5.0", "1.4.0", "1.1.0", "1.0.0",
@@ -87,10 +91,34 @@ pub struct PackageQuery {
     pub id: Option<String>,
     pub name: Option<String>,
     pub moniker: Option<String>,
+    pub tag: Option<String>,
+    pub command: Option<String>,
     pub source: Option<String>,
+    pub count: Option<usize>,
     pub exact: bool,
     pub version: Option<String>,
     pub channel: Option<String>,
+    pub locale: Option<String>,
+    pub installer_type: Option<String>,
+    pub installer_architecture: Option<String>,
+    pub install_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListQuery {
+    pub query: Option<String>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub moniker: Option<String>,
+    pub tag: Option<String>,
+    pub command: Option<String>,
+    pub source: Option<String>,
+    pub count: Option<usize>,
+    pub exact: bool,
+    pub install_scope: Option<String>,
+    pub upgrade_only: bool,
+    pub include_unknown: bool,
+    pub include_pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -102,12 +130,38 @@ pub struct SearchMatch {
     pub moniker: Option<String>,
     pub version: Option<String>,
     pub channel: Option<String>,
+    pub match_criteria: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchResponse {
     pub matches: Vec<SearchMatch>,
     pub warnings: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListMatch {
+    pub name: String,
+    pub id: String,
+    pub local_id: String,
+    pub installed_version: String,
+    pub available_version: Option<String>,
+    pub source_name: Option<String>,
+    pub publisher: Option<String>,
+    pub scope: Option<String>,
+    pub installer_category: Option<String>,
+    pub install_location: Option<String>,
+    pub package_family_names: Vec<String>,
+    pub product_codes: Vec<String>,
+    pub upgrade_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListResponse {
+    pub matches: Vec<ListMatch>,
+    pub warnings: Vec<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,10 +186,20 @@ pub struct Manifest {
     pub license_url: Option<String>,
     pub privacy_url: Option<String>,
     pub author: Option<String>,
+    pub copyright: Option<String>,
+    pub copyright_url: Option<String>,
     pub release_notes: Option<String>,
     pub release_notes_url: Option<String>,
     pub tags: Vec<String>,
+    pub package_dependencies: Vec<String>,
+    pub documentation: Vec<Documentation>,
     pub installers: Vec<Installer>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Documentation {
+    pub label: Option<String>,
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -148,12 +212,17 @@ pub struct Installer {
     pub locale: Option<String>,
     pub scope: Option<String>,
     pub release_date: Option<String>,
+    pub package_family_name: Option<String>,
+    pub upgrade_code: Option<String>,
+    pub commands: Vec<String>,
+    pub package_dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShowResult {
     pub package: SearchMatch,
     pub manifest: Manifest,
+    pub selected_installer: Option<Installer>,
     pub cached_files: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
@@ -180,10 +249,31 @@ pub struct SourceUpdateResult {
 }
 
 #[derive(Debug, Clone)]
+struct InstalledPackage {
+    name: String,
+    local_id: String,
+    installed_version: String,
+    publisher: Option<String>,
+    scope: Option<String>,
+    installer_category: Option<String>,
+    install_location: Option<String>,
+    package_family_names: Vec<String>,
+    product_codes: Vec<String>,
+    upgrade_codes: Vec<String>,
+    correlated: Option<SearchMatch>,
+}
+
+#[derive(Debug, Clone)]
 struct LocatedMatch {
     display: SearchMatch,
     source_index: usize,
     locator: MatchLocator,
+}
+
+#[derive(Debug)]
+struct SearchSourceMatches {
+    matches: Vec<LocatedMatch>,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -287,9 +377,98 @@ impl Repository {
     }
 
     pub fn search(&mut self, query: &PackageQuery) -> Result<SearchResponse> {
-        let (matches, warnings) = self.search_located(query, SearchSemantics::Many)?;
+        let (matches, warnings, truncated) = self.search_located(query, SearchSemantics::Many)?;
         Ok(SearchResponse {
             matches: matches.into_iter().map(|item| item.display).collect(),
+            warnings,
+            truncated,
+        })
+    }
+
+    pub fn list(&mut self, query: &ListQuery) -> Result<ListResponse> {
+        if (query.include_unknown || query.include_pinned) && !query.upgrade_only {
+            bail!("--include-unknown and --include-pinned require --upgrade-available");
+        }
+        if query.source.is_some()
+            && query.query.is_none()
+            && query.id.is_none()
+            && query.name.is_none()
+            && query.moniker.is_none()
+            && query.tag.is_none()
+            && query.command.is_none()
+        {
+            bail!("list --source currently requires a query or explicit filter");
+        }
+        if query.upgrade_only && !list_query_needs_available_lookup(query) {
+            bail!("unfiltered --upgrade-available is not implemented yet");
+        }
+
+        let mut warnings = Vec::new();
+        let mut installed = collect_installed_packages(query.install_scope.as_deref())?;
+
+        let available_candidates = if list_query_needs_available_lookup(query) {
+            let available_query = package_query_from_list_query(query);
+            let (matches, source_warnings, _) =
+                self.search_located(&available_query, SearchSemantics::Many)?;
+            warnings.extend(source_warnings);
+            Some(
+                matches
+                    .into_iter()
+                    .map(|candidate| candidate.display)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
+        for package in &mut installed {
+            if let Some(candidates) = available_candidates.as_deref() {
+                package.correlated = correlate_installed_package(
+                    package,
+                    candidates,
+                    allow_loose_list_correlation(query),
+                );
+            }
+        }
+
+        let mut matches = installed
+            .into_iter()
+            .filter(|package| {
+                list_package_matches(package, query)
+                    && (!query.upgrade_only
+                        || installed_package_matches_upgrade_filter(package, query))
+            })
+            .collect::<Vec<_>>();
+
+        matches.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.local_id.cmp(&right.local_id))
+        });
+
+        let truncated = if let Some(limit) = query.count {
+            let was_truncated = matches.len() > limit;
+            matches.truncate(limit);
+            was_truncated
+        } else {
+            false
+        };
+
+        Ok(ListResponse {
+            matches: matches.into_iter().map(list_match_from_installed).collect(),
+            warnings,
+            truncated,
+        })
+    }
+
+    pub fn search_versions(&mut self, query: &PackageQuery) -> Result<VersionsResult> {
+        let (located, warnings) =
+            self.find_single_match_with_semantics(query, SearchSemantics::Many)?;
+        let versions = self.versions_for_match(&located, query)?;
+        Ok(VersionsResult {
+            package: located.display,
+            versions,
             warnings,
         })
     }
@@ -307,10 +486,12 @@ impl Repository {
     pub fn show(&mut self, query: &PackageQuery) -> Result<ShowResult> {
         let (located, warnings) = self.find_single_match(query)?;
         let (manifest, cached_files) = self.manifest_for_match(&located, query)?;
+        let selected_installer = select_installer(&manifest.installers, query);
 
         Ok(ShowResult {
             package: located.display,
             manifest,
+            selected_installer,
             cached_files,
             warnings,
         })
@@ -328,7 +509,15 @@ impl Repository {
     }
 
     fn find_single_match(&mut self, query: &PackageQuery) -> Result<(LocatedMatch, Vec<String>)> {
-        let (matches, warnings) = self.search_located(query, SearchSemantics::Single)?;
+        self.find_single_match_with_semantics(query, SearchSemantics::Single)
+    }
+
+    fn find_single_match_with_semantics(
+        &mut self,
+        query: &PackageQuery,
+        semantics: SearchSemantics,
+    ) -> Result<(LocatedMatch, Vec<String>)> {
+        let (matches, warnings, _) = self.search_located(query, semantics)?;
 
         if matches.is_empty() {
             bail!("no package matched the supplied query");
@@ -356,19 +545,33 @@ impl Repository {
         &mut self,
         query: &PackageQuery,
         semantics: SearchSemantics,
-    ) -> Result<(Vec<LocatedMatch>, Vec<String>)> {
+    ) -> Result<(Vec<LocatedMatch>, Vec<String>, bool)> {
         let indexes = self.resolve_source_indexes(query.source.as_deref())?;
         let mut matches = Vec::new();
         let mut warnings = Vec::new();
+        let mut truncated = false;
 
         for index in indexes {
             match self.search_source(index, query, semantics) {
-                Ok(mut source_matches) => matches.append(&mut source_matches),
-                Err(error) => warnings.push(format!("{}: {error:#}", self.store.sources[index].name)),
+                Ok(mut source_matches) => {
+                    truncated |= source_matches.truncated;
+                    matches.append(&mut source_matches.matches);
+                }
+                Err(error) => {
+                    warnings.push(format!("{}: {error:#}", self.store.sources[index].name))
+                }
             }
         }
 
-        Ok((matches, warnings))
+        if semantics == SearchSemantics::Many {
+            let limit = max_results(query);
+            if matches.len() > limit {
+                truncated = true;
+                matches.truncate(limit);
+            }
+        }
+
+        Ok((matches, warnings, truncated))
     }
 
     fn search_source(
@@ -376,7 +579,7 @@ impl Repository {
         source_index: usize,
         query: &PackageQuery,
         semantics: SearchSemantics,
-    ) -> Result<Vec<LocatedMatch>> {
+    ) -> Result<SearchSourceMatches> {
         match self.store.sources[source_index].kind {
             SourceKind::PreIndexed => self.search_preindexed(source_index, query, semantics),
             SourceKind::Rest => self.search_rest(source_index, query, semantics),
@@ -508,35 +711,14 @@ impl Repository {
         source_index: usize,
         query: &PackageQuery,
         semantics: SearchSemantics,
-    ) -> Result<Vec<LocatedMatch>> {
+    ) -> Result<SearchSourceMatches> {
         let connection = self.open_preindexed_connection(source_index)?;
         let source = self.source_clone(source_index);
 
         match query_v2_matches(&connection, query, semantics) {
-            Ok(rows) => Ok(rows
-                .into_iter()
-                .map(|row| LocatedMatch {
-                    display: SearchMatch {
-                        source_name: source.name.clone(),
-                        source_kind: source.kind,
-                        id: row.id.clone(),
-                        name: row.name.clone(),
-                        moniker: row.moniker.clone(),
-                        version: Some(row.version.clone()),
-                        channel: None,
-                    },
-                    source_index,
-                    locator: MatchLocator::PreIndexedV2 {
-                        package_rowid: row.package_rowid,
-                        package_hash: row.package_hash,
-                    },
-                })
-                .collect()),
-            Err(error) if can_fallback_to_v1(&error) => {
-                let rows = query_v1_matches(&connection, query, semantics)?;
-                let grouped = group_v1_rows(rows);
-
-                Ok(grouped
+            Ok((rows, truncated)) => Ok(SearchSourceMatches {
+                truncated,
+                matches: rows
                     .into_iter()
                     .map(|row| LocatedMatch {
                         display: SearchMatch {
@@ -546,14 +728,43 @@ impl Repository {
                             name: row.name.clone(),
                             moniker: row.moniker.clone(),
                             version: Some(row.version.clone()),
-                            channel: Some(row.channel.clone()),
+                            channel: None,
+                            match_criteria: row.match_criteria.clone(),
                         },
                         source_index,
-                        locator: MatchLocator::PreIndexedV1 {
+                        locator: MatchLocator::PreIndexedV2 {
                             package_rowid: row.package_rowid,
+                            package_hash: row.package_hash,
                         },
                     })
-                    .collect())
+                    .collect(),
+            }),
+            Err(error) if can_fallback_to_v1(&error) => {
+                let (rows, truncated) = query_v1_matches(&connection, query, semantics)?;
+                let grouped = group_v1_rows(rows);
+
+                Ok(SearchSourceMatches {
+                    truncated,
+                    matches: grouped
+                        .into_iter()
+                        .map(|row| LocatedMatch {
+                            display: SearchMatch {
+                                source_name: source.name.clone(),
+                                source_kind: source.kind,
+                                id: row.id.clone(),
+                                name: row.name.clone(),
+                                moniker: row.moniker.clone(),
+                                version: Some(row.version.clone()),
+                                channel: Some(row.channel.clone()),
+                                match_criteria: row.match_criteria.clone(),
+                            },
+                            source_index,
+                            locator: MatchLocator::PreIndexedV1 {
+                                package_rowid: row.package_rowid,
+                            },
+                        })
+                        .collect(),
+                })
             }
             Err(error) => Err(error),
         }
@@ -564,7 +775,7 @@ impl Repository {
         source_index: usize,
         query: &PackageQuery,
         semantics: SearchSemantics,
-    ) -> Result<Vec<LocatedMatch>> {
+    ) -> Result<SearchSourceMatches> {
         let source = self.source_clone(source_index);
         let info = self.load_rest_information(source_index)?;
         let contract = choose_contract(&info.server_supported_versions)
@@ -589,6 +800,7 @@ impl Repository {
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_default();
+        let max_results = max_results(query);
 
         let mut results = Vec::new();
         for item in data {
@@ -596,7 +808,6 @@ impl Repository {
                 .ok_or_else(|| anyhow!("REST search result missing PackageIdentifier"))?;
             let package_name = json_string(&item, "PackageName")
                 .ok_or_else(|| anyhow!("REST search result missing PackageName"))?;
-            let publisher = json_string(&item, "Publisher");
             let mut versions = parse_rest_versions(&item)?;
             sort_versions_desc(&mut versions);
             let latest = versions
@@ -610,13 +821,14 @@ impl Repository {
                     source_kind: source.kind,
                     id: package_id.clone(),
                     name: package_name,
-                    moniker: publisher,
+                    moniker: json_string(&item, "Moniker"),
                     version: Some(latest.version.clone()),
                     channel: if latest.channel.is_empty() {
                         None
                     } else {
                         Some(latest.channel.clone())
                     },
+                    match_criteria: rest_match_criteria(&item, query, semantics),
                 },
                 source_index,
                 locator: MatchLocator::Rest {
@@ -626,7 +838,10 @@ impl Repository {
             });
         }
 
-        Ok(results)
+        Ok(SearchSourceMatches {
+            truncated: results.len() >= max_results,
+            matches: results,
+        })
     }
 
     fn open_preindexed_connection(&mut self, source_index: usize) -> Result<Connection> {
@@ -936,12 +1151,14 @@ struct CachedBytes {
 
 #[derive(Debug, Clone)]
 struct V1SearchRow {
+    manifest_rowid: i64,
     package_rowid: i64,
     version: String,
     channel: String,
     id: String,
     name: String,
     moniker: Option<String>,
+    match_criteria: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -960,6 +1177,384 @@ struct V2SearchRow {
     name: String,
     moniker: Option<String>,
     version: String,
+    match_criteria: Option<String>,
+}
+
+fn list_query_needs_available_lookup(query: &ListQuery) -> bool {
+    query.query.is_some()
+        || query.id.is_some()
+        || query.name.is_some()
+        || query.moniker.is_some()
+        || query.tag.is_some()
+        || query.command.is_some()
+        || query.source.is_some()
+}
+
+fn package_query_from_list_query(query: &ListQuery) -> PackageQuery {
+    PackageQuery {
+        query: query.query.clone(),
+        id: query.id.clone(),
+        name: query.name.clone(),
+        moniker: query.moniker.clone(),
+        tag: query.tag.clone(),
+        command: query.command.clone(),
+        source: query.source.clone(),
+        count: Some(LIST_LOOKUP_MAX_RESULTS),
+        exact: query.exact,
+        version: None,
+        channel: None,
+        locale: None,
+        installer_type: None,
+        installer_architecture: None,
+        install_scope: query.install_scope.clone(),
+    }
+}
+
+fn allow_loose_list_correlation(query: &ListQuery) -> bool {
+    query.query.is_some() || query.id.is_some() || query.name.is_some()
+}
+
+fn installed_package_has_upgrade(package: &InstalledPackage) -> bool {
+    package
+        .correlated
+        .as_ref()
+        .and_then(|candidate| candidate.version.as_deref())
+        .is_some_and(|version| {
+            compare_version(version, &package.installed_version) == Ordering::Greater
+        })
+}
+
+fn installed_package_has_unknown_version(package: &InstalledPackage) -> bool {
+    package.installed_version.eq_ignore_ascii_case("Unknown")
+}
+
+fn installed_package_matches_upgrade_filter(package: &InstalledPackage, query: &ListQuery) -> bool {
+    installed_package_has_upgrade(package)
+        || (query.include_unknown
+            && installed_package_has_unknown_version(package)
+            && package.correlated.is_some())
+}
+
+fn list_match_from_installed(package: InstalledPackage) -> ListMatch {
+    let available_version = package.correlated.as_ref().and_then(|candidate| {
+        candidate.version.as_ref().and_then(|candidate_version| {
+            if installed_package_has_unknown_version(&package)
+                || compare_version(candidate_version, &package.installed_version)
+                    == Ordering::Greater
+            {
+                Some(candidate_version.clone())
+            } else {
+                None
+            }
+        })
+    });
+    let source_name = package
+        .correlated
+        .as_ref()
+        .map(|candidate| candidate.source_name.clone())
+        .filter(|value| !value.is_empty());
+    let id = package
+        .correlated
+        .as_ref()
+        .map(|candidate| candidate.id.clone())
+        .unwrap_or_else(|| package.local_id.clone());
+
+    ListMatch {
+        name: package.name,
+        id,
+        local_id: package.local_id,
+        installed_version: package.installed_version,
+        available_version,
+        source_name,
+        publisher: package.publisher,
+        scope: package.scope,
+        installer_category: package.installer_category,
+        install_location: package.install_location,
+        package_family_names: package.package_family_names,
+        product_codes: package.product_codes,
+        upgrade_codes: package.upgrade_codes,
+    }
+}
+
+fn list_package_matches(package: &InstalledPackage, query: &ListQuery) -> bool {
+    let correlated = package.correlated.as_ref();
+
+    if let Some(value) = &query.id {
+        let local_match = matches_text(&package.local_id, value, query.exact);
+        let correlated_match = correlated
+            .map(|candidate| matches_text(&candidate.id, value, query.exact))
+            .unwrap_or(false);
+        if !local_match && !correlated_match {
+            return false;
+        }
+    }
+
+    if let Some(value) = &query.name
+        && !matches_text(&package.name, value, query.exact)
+    {
+        return false;
+    }
+
+    if let Some(value) = &query.query {
+        let local_match = matches_text(&package.name, value, query.exact)
+            || matches_text(&package.local_id, value, query.exact);
+        let correlated_match = correlated
+            .map(|candidate| {
+                matches_text(&candidate.id, value, query.exact)
+                    || matches_text(&candidate.name, value, query.exact)
+            })
+            .unwrap_or(false);
+        if !local_match && !correlated_match {
+            return false;
+        }
+    }
+
+    if let Some(source) = &query.source
+        && correlated
+            .map(|candidate| !candidate.source_name.eq_ignore_ascii_case(source))
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    if (query.moniker.is_some() || query.tag.is_some() || query.command.is_some())
+        && correlated.is_none()
+    {
+        return false;
+    }
+
+    true
+}
+
+fn correlate_installed_package(
+    package: &InstalledPackage,
+    candidates: &[SearchMatch],
+    allow_loose_name_match: bool,
+) -> Option<SearchMatch> {
+    if package.local_id.starts_with("MSIX\\") {
+        return None;
+    }
+
+    let installed_name = normalize_correlation_name(&package.name);
+    let candidate_names = correlation_name_candidates(&package.name);
+
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_name = normalize_correlation_name(&candidate.name);
+            let score = if candidate.id.eq_ignore_ascii_case(&package.local_id) {
+                1000
+            } else if candidate_names.iter().any(|name| {
+                let normalized = normalize_correlation_name(name);
+                normalized == candidate_name
+            }) {
+                900
+            } else if allow_loose_name_match
+                && candidate_name.len() >= 6
+                && installed_name.contains(&candidate_name)
+            {
+                700
+            } else {
+                0
+            };
+
+            (score > 0).then_some((score, candidate.clone()))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, candidate)| candidate)
+}
+
+fn correlation_name_candidates(name: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    candidates.push(name.trim().to_string());
+
+    let mut trimmed = name.trim().to_string();
+    if let Some(index) = trimmed.find(" (") {
+        trimmed.truncate(index);
+    }
+
+    let mut words = Vec::new();
+    for token in trimmed.split_whitespace() {
+        let lower = token
+            .trim_matches(|ch: char| ch == '(' || ch == ')')
+            .to_ascii_lowercase();
+        if !words.is_empty()
+            && (lower == "x64"
+                || lower == "x86"
+                || lower == "arm64"
+                || token.chars().any(|ch| ch.is_ascii_digit()))
+        {
+            break;
+        }
+        words.push(token);
+    }
+
+    if !words.is_empty() {
+        candidates.push(words.join(" "));
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn normalize_correlation_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+#[cfg(windows)]
+fn collect_installed_packages(scope: Option<&str>) -> Result<Vec<InstalledPackage>> {
+    let mut packages = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let machine = !matches!(scope, Some(value) if value.eq_ignore_ascii_case("user"));
+    let user = !matches!(scope, Some(value) if value.eq_ignore_ascii_case("machine"));
+
+    if machine {
+        collect_uninstall_view(
+            &mut packages,
+            &mut seen,
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            "Machine",
+            "X64",
+            KEY_READ | KEY_WOW64_64KEY,
+        )?;
+        collect_uninstall_view(
+            &mut packages,
+            &mut seen,
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            "Machine",
+            "X86",
+            KEY_READ | KEY_WOW64_32KEY,
+        )?;
+    }
+
+    if user {
+        collect_uninstall_view(
+            &mut packages,
+            &mut seen,
+            RegKey::predef(HKEY_CURRENT_USER),
+            "User",
+            "X64",
+            KEY_READ,
+        )?;
+    }
+
+    Ok(packages)
+}
+
+#[cfg(not(windows))]
+fn collect_installed_packages(_scope: Option<&str>) -> Result<Vec<InstalledPackage>> {
+    bail!("installed package discovery is only supported on Windows");
+}
+
+#[cfg(windows)]
+fn collect_uninstall_view(
+    packages: &mut Vec<InstalledPackage>,
+    seen: &mut BTreeSet<String>,
+    root: RegKey,
+    scope: &str,
+    arch: &str,
+    flags: u32,
+) -> Result<()> {
+    const UNINSTALL_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+
+    let uninstall = match root.open_subkey_with_flags(UNINSTALL_PATH, flags) {
+        Ok(key) => key,
+        Err(_) => return Ok(()),
+    };
+
+    for key_name in uninstall.enum_keys().flatten() {
+        let subkey = match uninstall.open_subkey_with_flags(&key_name, flags) {
+            Ok(key) => key,
+            Err(_) => continue,
+        };
+        if read_reg_dword(&subkey, "SystemComponent") == Some(1)
+            || read_reg_string(&subkey, "ParentKeyName").is_some()
+        {
+            continue;
+        }
+
+        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let local_id = format!(r"ARP\{scope}\{arch}\{key_name}");
+        let installed_version =
+            read_reg_string(&subkey, "DisplayVersion").unwrap_or_else(|| "Unknown".to_string());
+        let publisher = read_reg_string(&subkey, "Publisher");
+        let install_location = read_reg_string(&subkey, "InstallLocation");
+        let package_family_names = read_reg_string(&subkey, "PackageFamilyName")
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut product_codes = read_reg_string(&subkey, "ProductCode")
+            .into_iter()
+            .collect::<Vec<_>>();
+        if product_codes.is_empty() && looks_like_product_code(&key_name) {
+            product_codes.push(key_name.to_ascii_lowercase());
+        }
+        let upgrade_codes = read_reg_string(&subkey, "UpgradeCode")
+            .into_iter()
+            .collect::<Vec<_>>();
+        let installer_category = if local_id.starts_with("ARP\\")
+            && read_reg_dword(&subkey, "WindowsInstaller") == Some(1)
+        {
+            Some("msi".to_string())
+        } else if key_name.starts_with("MSIX\\") {
+            Some("msix".to_string())
+        } else {
+            Some("exe".to_string())
+        };
+
+        let dedupe_key = format!(
+            "{}|{}|{}|{}",
+            local_id,
+            name.to_ascii_lowercase(),
+            installed_version.to_ascii_lowercase(),
+            publisher.clone().unwrap_or_default().to_ascii_lowercase()
+        );
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+
+        packages.push(InstalledPackage {
+            name,
+            local_id,
+            installed_version,
+            publisher,
+            scope: Some(scope.to_string()),
+            installer_category,
+            install_location,
+            package_family_names,
+            product_codes,
+            upgrade_codes,
+            correlated: None,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_reg_string(key: &RegKey, value_name: &str) -> Option<String> {
+    key.get_value::<String, _>(value_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(windows)]
+fn read_reg_dword(key: &RegKey, value_name: &str) -> Option<u32> {
+    key.get_value::<u32, _>(value_name).ok()
+}
+
+fn looks_like_product_code(value: &str) -> bool {
+    value.starts_with('{') && value.ends_with('}')
 }
 
 fn ensure_app_dirs() -> Result<()> {
@@ -1048,7 +1643,12 @@ fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
     fs::write(path, bytes).context("failed to write JSON file")
 }
 
-fn query_rows<T, F>(connection: &Connection, sql: &str, params: Vec<SqlValue>, mut map: F) -> Result<Vec<T>>
+fn query_rows<T, F>(
+    connection: &Connection,
+    sql: &str,
+    params: Vec<SqlValue>,
+    mut map: F,
+) -> Result<Vec<T>>
 where
     F: FnMut(&SqlRow<'_>) -> Result<T>,
 {
@@ -1175,13 +1775,15 @@ fn query_v2_matches(
     connection: &Connection,
     query: &PackageQuery,
     semantics: SearchSemantics,
-) -> Result<Vec<V2SearchRow>> {
+) -> Result<(Vec<V2SearchRow>, bool)> {
     let (where_clause, params) = build_preindexed_where_clause(query, true, semantics);
+    let limit = max_results(query);
     let sql = format!(
         "SELECT rowid, id, name, moniker, latest_version, hash \
-         FROM packages WHERE {where_clause} LIMIT 50"
+         FROM packages WHERE {where_clause} LIMIT {}",
+        limit + 1
     );
-    query_rows(
+    let mut rows = query_rows(
         connection,
         &sql,
         params.into_iter().map(SqlValue::Text).collect(),
@@ -1193,42 +1795,59 @@ fn query_v2_matches(
                 moniker: row_opt_string(row, 3)?,
                 version: row_string(row, 4)?,
                 package_hash: row_hex_string(row, 5)?,
+                match_criteria: None,
             })
         },
-    )
+    )?;
+    for row in &mut rows {
+        row.match_criteria = infer_preindexed_match_criteria_v2(connection, row, query, semantics)?;
+    }
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    Ok((rows, truncated))
 }
 
 fn query_v1_matches(
     connection: &Connection,
     query: &PackageQuery,
     semantics: SearchSemantics,
-) -> Result<Vec<V1SearchRow>> {
+) -> Result<(Vec<V1SearchRow>, bool)> {
     let (where_clause, params) = build_preindexed_where_clause(query, false, semantics);
+    let limit = max_results(query);
     let sql = format!(
-        "SELECT manifest.id, versions.version, channels.channel, ids.id, names.name, monikers.moniker \
+        "SELECT manifest.rowid, manifest.id, versions.version, channels.channel, ids.id, names.name, monikers.moniker \
          FROM manifest \
          JOIN ids ON manifest.id = ids.rowid \
          JOIN names ON manifest.name = names.rowid \
          LEFT JOIN monikers ON manifest.moniker = monikers.rowid \
          JOIN versions ON manifest.version = versions.rowid \
          JOIN channels ON manifest.channel = channels.rowid \
-         WHERE {where_clause}"
+         WHERE {where_clause} LIMIT {}",
+        limit + 1
     );
-    query_rows(
+    let mut rows = query_rows(
         connection,
         &sql,
         params.into_iter().map(SqlValue::Text).collect(),
         |row| {
             Ok(V1SearchRow {
-                package_rowid: row_i64(row, 0)?,
-                version: row_string(row, 1)?,
-                channel: row_string(row, 2)?,
-                id: row_string(row, 3)?,
-                name: row_string(row, 4)?,
-                moniker: row_opt_string(row, 5)?,
+                manifest_rowid: row_i64(row, 0)?,
+                package_rowid: row_i64(row, 1)?,
+                version: row_string(row, 2)?,
+                channel: row_string(row, 3)?,
+                id: row_string(row, 4)?,
+                name: row_string(row, 5)?,
+                moniker: row_opt_string(row, 6)?,
+                match_criteria: None,
             })
         },
-    )
+    )?;
+    for row in &mut rows {
+        row.match_criteria = infer_preindexed_match_criteria_v1(connection, row, query, semantics)?;
+    }
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    Ok((rows, truncated))
 }
 
 fn group_v1_rows(rows: Vec<V1SearchRow>) -> Vec<V1SearchRow> {
@@ -1337,45 +1956,134 @@ fn build_preindexed_where_clause(
     v2: bool,
     semantics: SearchSemantics,
 ) -> (String, Vec<String>) {
-    let moniker_column = if v2 {
-        "moniker"
+    let rowid_column = if v2 {
+        "packages.rowid"
     } else {
-        "monikers.moniker"
+        "manifest.rowid"
     };
     let id_column = if v2 { "id" } else { "ids.id" };
     let name_column = if v2 { "name" } else { "names.name" };
+    let moniker_column = if v2 { "moniker" } else { "monikers.moniker" };
     let exact_match = query.exact || semantics == SearchSemantics::Single;
+    let mut params = Vec::new();
 
     if let Some(value) = &query.id {
-        return single_field_where(id_column, value, exact_match);
+        return (
+            single_field_condition(id_column, value, exact_match, &mut params),
+            params,
+        );
     }
     if let Some(value) = &query.name {
-        return single_field_where(name_column, value, exact_match);
+        return (
+            single_field_condition(name_column, value, exact_match, &mut params),
+            params,
+        );
     }
     if let Some(value) = &query.moniker {
-        return single_field_where(moniker_column, value, exact_match);
+        return (
+            single_field_condition(moniker_column, value, exact_match, &mut params),
+            params,
+        );
+    }
+    if let Some(value) = &query.tag {
+        return (
+            mapped_field_condition(v2, "tag", value, rowid_column, exact_match, &mut params),
+            params,
+        );
+    }
+    if let Some(value) = &query.command {
+        return (
+            mapped_field_condition(v2, "command", value, rowid_column, exact_match, &mut params),
+            params,
+        );
     }
     if let Some(value) = &query.query {
         if exact_match {
-            let sql =
-                format!("({id_column} LIKE ?1 OR {name_column} LIKE ?2 OR {moniker_column} LIKE ?3)");
-            return (sql, vec![value.clone(), value.clone(), value.clone()]);
+            let conditions = vec![
+                single_field_condition(id_column, value, true, &mut params),
+                single_field_condition(name_column, value, true, &mut params),
+                single_field_condition(moniker_column, value, true, &mut params),
+            ];
+            return (format!("({})", conditions.join(" OR ")), params);
         }
 
-        let like = format!("%{value}%");
-        let sql =
-            format!("({id_column} LIKE ?1 OR {name_column} LIKE ?2 OR {moniker_column} LIKE ?3)");
-        return (sql, vec![like.clone(), like.clone(), like]);
+        let mut conditions = vec![
+            single_field_condition(id_column, value, false, &mut params),
+            single_field_condition(name_column, value, false, &mut params),
+            single_field_condition(moniker_column, value, false, &mut params),
+        ];
+        if semantics == SearchSemantics::Many {
+            conditions.push(mapped_field_condition(
+                v2,
+                "tag",
+                value,
+                rowid_column,
+                false,
+                &mut params,
+            ));
+            conditions.push(mapped_field_condition(
+                v2,
+                "command",
+                value,
+                rowid_column,
+                false,
+                &mut params,
+            ));
+        }
+        return (format!("({})", conditions.join(" OR ")), params);
     }
 
     ("1 = 1".to_string(), Vec::new())
 }
 
-fn single_field_where(column: &str, value: &str, exact: bool) -> (String, Vec<String>) {
-    if exact {
-        (format!("{column} LIKE ?1"), vec![value.to_string()])
+fn single_field_condition(
+    column: &str,
+    value: &str,
+    exact: bool,
+    params: &mut Vec<String>,
+) -> String {
+    params.push(match_parameter(value, exact));
+    format!("{column} LIKE ?{}", params.len())
+}
+
+fn mapped_field_condition(
+    v2: bool,
+    value_name: &str,
+    value: &str,
+    rowid_column: &str,
+    exact: bool,
+    params: &mut Vec<String>,
+) -> String {
+    let (table_name, map_table_name, map_value_column, map_owner_column) = if v2 {
+        (
+            format!("{value_name}s2"),
+            format!("{value_name}s2_map"),
+            value_name.to_string(),
+            "package".to_string(),
+        )
     } else {
-        (format!("{column} LIKE ?1"), vec![format!("%{value}%")])
+        (
+            format!("{value_name}s"),
+            format!("{value_name}s_map"),
+            value_name.to_string(),
+            "manifest".to_string(),
+        )
+    };
+    params.push(match_parameter(value, exact));
+    let parameter = params.len();
+    format!(
+        "EXISTS (SELECT 1 FROM {map_table_name} JOIN {table_name} ON \
+         {map_table_name}.{value_name} = {table_name}.rowid \
+         WHERE {map_table_name}.{map_owner_column} = {rowid_column} \
+         AND {table_name}.{map_value_column} LIKE ?{parameter})"
+    )
+}
+
+fn match_parameter(value: &str, exact: bool) -> String {
+    if exact {
+        value.to_string()
+    } else {
+        format!("%{value}%")
     }
 }
 
@@ -1385,7 +2093,10 @@ fn build_rest_search_body(
     semantics: SearchSemantics,
 ) -> Result<JsonValue> {
     let mut root = serde_json::Map::new();
-    root.insert("MaximumResults".to_string(), JsonValue::from(50));
+    root.insert(
+        "MaximumResults".to_string(),
+        JsonValue::from(max_results(query) as u64),
+    );
     let exact_match = query.exact || semantics == SearchSemantics::Single;
 
     if let Some(value) = &query.query {
@@ -1419,6 +2130,12 @@ fn build_rest_search_body(
     if let Some(value) = &query.moniker {
         filters.push(rest_filter("Moniker", value, exact_match));
     }
+    if let Some(value) = &query.tag {
+        filters.push(rest_filter("Tag", value, exact_match));
+    }
+    if let Some(value) = &query.command {
+        filters.push(rest_filter("Command", value, exact_match));
+    }
     append_required_rest_filters(&mut filters, info);
 
     if !filters.is_empty() {
@@ -1446,6 +2163,209 @@ fn rest_filter(field: &str, value: &str, exact: bool) -> JsonValue {
             "MatchType": if exact { "Exact" } else { "Substring" },
         }
     })
+}
+
+fn max_results(query: &PackageQuery) -> usize {
+    query.count.unwrap_or(DEFAULT_MAX_RESULTS).max(1)
+}
+
+fn infer_preindexed_match_criteria_v2(
+    connection: &Connection,
+    row: &V2SearchRow,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+) -> Result<Option<String>> {
+    infer_match_criteria(
+        row.moniker.as_deref(),
+        query,
+        semantics,
+        |value| {
+            find_mapped_value_v2(
+                connection,
+                "tags2",
+                "tags2_map",
+                "tag",
+                row.package_rowid,
+                value,
+                query.exact,
+            )
+        },
+        |value| {
+            find_mapped_value_v2(
+                connection,
+                "commands2",
+                "commands2_map",
+                "command",
+                row.package_rowid,
+                value,
+                query.exact,
+            )
+        },
+    )
+}
+
+fn infer_preindexed_match_criteria_v1(
+    connection: &Connection,
+    row: &V1SearchRow,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+) -> Result<Option<String>> {
+    infer_match_criteria(
+        row.moniker.as_deref(),
+        query,
+        semantics,
+        |value| {
+            find_mapped_value_v1(
+                connection,
+                "tags",
+                "tags_map",
+                "tag",
+                row.manifest_rowid,
+                value,
+                query.exact,
+            )
+        },
+        |value| {
+            find_mapped_value_v1(
+                connection,
+                "commands",
+                "commands_map",
+                "command",
+                row.manifest_rowid,
+                value,
+                query.exact,
+            )
+        },
+    )
+}
+
+fn infer_match_criteria<FTag, FCommand>(
+    moniker: Option<&str>,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+    find_tag: FTag,
+    find_command: FCommand,
+) -> Result<Option<String>>
+where
+    FTag: FnOnce(&str) -> Result<Option<String>>,
+    FCommand: FnOnce(&str) -> Result<Option<String>>,
+{
+    if let Some(value) = &query.tag {
+        return Ok(Some(format_match_criteria("Tag", value)));
+    }
+    if let Some(value) = &query.command {
+        return Ok(Some(format_match_criteria("Command", value)));
+    }
+    if let Some(value) = &query.moniker {
+        return Ok(Some(format_match_criteria(
+            "Moniker",
+            moniker.unwrap_or(value),
+        )));
+    }
+    if semantics == SearchSemantics::Single {
+        return Ok(None);
+    }
+    if let Some(value) = &query.query {
+        if let Some(moniker_value) =
+            moniker.filter(|candidate| matches_text(candidate, value, query.exact))
+        {
+            return Ok(Some(format_match_criteria("Moniker", moniker_value)));
+        }
+        if let Some(tag) = find_tag(value)? {
+            return Ok(Some(format_match_criteria("Tag", &tag)));
+        }
+        if let Some(command) = find_command(value)? {
+            return Ok(Some(format_match_criteria("Command", &command)));
+        }
+    }
+    Ok(None)
+}
+
+fn find_mapped_value_v2(
+    connection: &Connection,
+    table_name: &str,
+    map_table_name: &str,
+    value_name: &str,
+    package_rowid: i64,
+    query: &str,
+    exact: bool,
+) -> Result<Option<String>> {
+    let sql = format!(
+        "SELECT {table_name}.{value_name} FROM {map_table_name} \
+         JOIN {table_name} ON {map_table_name}.{value_name} = {table_name}.rowid \
+         WHERE {map_table_name}.package = ?1 AND {table_name}.{value_name} LIKE ?2 LIMIT 1"
+    );
+    query_optional_value(
+        connection,
+        &sql,
+        vec![
+            SqlValue::Integer(package_rowid),
+            SqlValue::Text(match_parameter(query, exact)),
+        ],
+        |row| row_string(row, 0),
+    )
+}
+
+fn find_mapped_value_v1(
+    connection: &Connection,
+    table_name: &str,
+    map_table_name: &str,
+    value_name: &str,
+    manifest_rowid: i64,
+    query: &str,
+    exact: bool,
+) -> Result<Option<String>> {
+    let sql = format!(
+        "SELECT {table_name}.{value_name} FROM {map_table_name} \
+         JOIN {table_name} ON {map_table_name}.{value_name} = {table_name}.rowid \
+         WHERE {map_table_name}.manifest = ?1 AND {table_name}.{value_name} LIKE ?2 LIMIT 1"
+    );
+    query_optional_value(
+        connection,
+        &sql,
+        vec![
+            SqlValue::Integer(manifest_rowid),
+            SqlValue::Text(match_parameter(query, exact)),
+        ],
+        |row| row_string(row, 0),
+    )
+}
+
+fn rest_match_criteria(
+    item: &JsonValue,
+    query: &PackageQuery,
+    semantics: SearchSemantics,
+) -> Option<String> {
+    if let Some(value) = &query.tag {
+        return Some(format_match_criteria("Tag", value));
+    }
+    if let Some(value) = &query.command {
+        return Some(format_match_criteria("Command", value));
+    }
+    if let Some(value) = &query.moniker {
+        return Some(format_match_criteria("Moniker", value));
+    }
+    if semantics == SearchSemantics::Single {
+        return None;
+    }
+    let value = query.query.as_deref()?;
+    json_string(item, "Moniker")
+        .filter(|candidate| matches_text(candidate, value, query.exact))
+        .map(|candidate| format_match_criteria("Moniker", &candidate))
+}
+
+fn format_match_criteria(field: &str, value: &str) -> String {
+    format!("{field}: {value}")
+}
+
+fn matches_text(candidate: &str, query: &str, exact: bool) -> bool {
+    if exact {
+        candidate.eq_ignore_ascii_case(query)
+    } else {
+        candidate
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+    }
 }
 
 fn parse_rest_versions(item: &JsonValue) -> Result<Vec<VersionKey>> {
@@ -1501,9 +2421,13 @@ fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
         license_url: yaml_localized_string(&merged, "LicenseUrl"),
         privacy_url: yaml_localized_string(&merged, "PrivacyUrl"),
         author: yaml_localized_string(&merged, "Author"),
+        copyright: yaml_localized_string(&merged, "Copyright"),
+        copyright_url: yaml_localized_string(&merged, "CopyrightUrl"),
         release_notes: yaml_localized_string(&merged, "ReleaseNotes"),
         release_notes_url: yaml_localized_string(&merged, "ReleaseNotesUrl"),
         tags: yaml_string_list(&merged, "Tags"),
+        package_dependencies: yaml_package_dependencies(&merged),
+        documentation: yaml_documentation_list(&merged),
         installers,
     })
 }
@@ -1553,6 +2477,10 @@ fn parse_rest_manifest(
                     locale: json_string(item, "InstallerLocale"),
                     scope: json_string(item, "Scope"),
                     release_date: json_string(item, "ReleaseDate"),
+                    package_family_name: json_string(item, "PackageFamilyName"),
+                    upgrade_code: json_string(item, "UpgradeCode"),
+                    commands: json_string_list(item, "Commands"),
+                    package_dependencies: json_package_dependencies(item),
                 })
                 .collect::<Vec<_>>()
         })
@@ -1574,9 +2502,13 @@ fn parse_rest_manifest(
         license_url: json_string(default_locale, "LicenseUrl"),
         privacy_url: json_string(default_locale, "PrivacyUrl"),
         author: json_string(default_locale, "Author"),
+        copyright: json_string(default_locale, "Copyright"),
+        copyright_url: json_string(default_locale, "CopyrightUrl"),
         release_notes: json_string(default_locale, "ReleaseNotes"),
         release_notes_url: json_string(default_locale, "ReleaseNotesUrl"),
         tags: json_string_list(default_locale, "Tags"),
+        package_dependencies: json_package_dependencies(selected),
+        documentation: json_documentation_list(default_locale),
         installers,
     })
 }
@@ -1618,6 +2550,9 @@ fn installer_defaults(root: &YamlMapping) -> YamlMapping {
         "InstallerLocale",
         "Scope",
         "ReleaseDate",
+        "PackageFamilyName",
+        "UpgradeCode",
+        "Commands",
     ];
     let mut defaults = YamlMapping::new();
     for key in keys {
@@ -1638,6 +2573,10 @@ fn installer_from_yaml(root: &YamlMapping) -> Installer {
         locale: yaml_string(root, "InstallerLocale"),
         scope: yaml_string(root, "Scope"),
         release_date: yaml_string(root, "ReleaseDate"),
+        package_family_name: yaml_string(root, "PackageFamilyName"),
+        upgrade_code: yaml_string(root, "UpgradeCode"),
+        commands: yaml_string_list(root, "Commands"),
+        package_dependencies: yaml_package_dependencies(root),
     }
 }
 
@@ -1654,8 +2593,7 @@ fn yaml_string_from_root(root: &YamlMapping, key: &str) -> Option<String> {
 }
 
 fn yaml_string(root: &YamlMapping, key: &str) -> Option<String> {
-    root.get(YamlValue::from(key))
-        .and_then(yaml_scalar_string)
+    root.get(YamlValue::from(key)).and_then(yaml_scalar_string)
 }
 
 fn yaml_scalar_string(value: &YamlValue) -> Option<String> {
@@ -1682,6 +2620,40 @@ fn yaml_string_list(root: &YamlMapping, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn yaml_documentation_list(root: &YamlMapping) -> Vec<Documentation> {
+    root.get(YamlValue::from("Documentations"))
+        .and_then(YamlValue::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(YamlValue::as_mapping)
+                .filter_map(|item| {
+                    let url = yaml_string(item, "DocumentUrl")?;
+                    Some(Documentation {
+                        label: yaml_string(item, "DocumentLabel"),
+                        url,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn yaml_package_dependencies(root: &YamlMapping) -> Vec<String> {
+    root.get(YamlValue::from("Dependencies"))
+        .and_then(YamlValue::as_mapping)
+        .and_then(|deps| deps.get(YamlValue::from("PackageDependencies")))
+        .and_then(YamlValue::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(YamlValue::as_mapping)
+                .filter_map(|item| yaml_string(item, "PackageIdentifier"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn json_string(value: &JsonValue, key: &str) -> Option<String> {
     value
         .get(key)
@@ -1698,6 +2670,40 @@ fn json_string_list(value: &JsonValue, key: &str) -> Vec<String> {
                 .iter()
                 .filter_map(JsonValue::as_str)
                 .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_documentation_list(value: &JsonValue) -> Vec<Documentation> {
+    value
+        .get("Documentations")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let url = json_string(item, "DocumentUrl")?;
+                    Some(Documentation {
+                        label: json_string(item, "DocumentLabel"),
+                        url,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_package_dependencies(value: &JsonValue) -> Vec<String> {
+    value
+        .get("Dependencies")
+        .and_then(JsonValue::as_object)
+        .and_then(|deps| deps.get("PackageDependencies"))
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| json_string(item, "PackageIdentifier"))
                 .collect()
         })
         .unwrap_or_default()
@@ -1782,6 +2788,146 @@ fn major_minor(version: &str) -> (String, String) {
 
 fn default_market() -> String {
     std::env::var("WINGET_RS_MARKET").unwrap_or_else(|_| DEFAULT_MARKET.to_string())
+}
+
+fn select_installer(installers: &[Installer], query: &PackageQuery) -> Option<Installer> {
+    let requested_locale = query.locale.as_deref();
+    let requested_architecture = query.installer_architecture.as_deref();
+    let requested_type = query.installer_type.as_deref();
+    let requested_scope = query.install_scope.as_deref();
+    let system_architecture = current_architecture();
+
+    installers
+        .iter()
+        .filter(|installer| installer_matches_requested(installer, requested_type, requested_scope))
+        .filter(|installer| {
+            installer_matches_architecture(installer, requested_architecture, system_architecture)
+        })
+        .max_by_key(|installer| {
+            installer_rank(
+                installer,
+                requested_locale,
+                requested_architecture,
+                system_architecture,
+            )
+        })
+        .cloned()
+}
+
+fn installer_matches_requested(
+    installer: &Installer,
+    requested_type: Option<&str>,
+    requested_scope: Option<&str>,
+) -> bool {
+    matches_optional_ci(installer.installer_type.as_deref(), requested_type)
+        && matches_optional_ci(installer.scope.as_deref(), requested_scope)
+}
+
+fn installer_matches_architecture(
+    installer: &Installer,
+    requested_architecture: Option<&str>,
+    system_architecture: &str,
+) -> bool {
+    let Some(architecture) = installer.architecture.as_deref() else {
+        return true;
+    };
+
+    let architecture = architecture.to_ascii_lowercase();
+    if let Some(requested) = requested_architecture {
+        return architecture.eq_ignore_ascii_case(requested);
+    }
+
+    preferred_architectures(system_architecture)
+        .iter()
+        .any(|candidate| architecture.eq_ignore_ascii_case(candidate))
+}
+
+fn installer_rank(
+    installer: &Installer,
+    requested_locale: Option<&str>,
+    requested_architecture: Option<&str>,
+    system_architecture: &str,
+) -> (i32, i32, i32) {
+    let architecture_rank = architecture_rank(
+        installer.architecture.as_deref(),
+        requested_architecture.unwrap_or(system_architecture),
+        requested_architecture.is_some(),
+        system_architecture,
+    );
+    let locale_rank = locale_rank(installer.locale.as_deref(), requested_locale);
+    let command_rank = if installer.commands.is_empty() { 0 } else { 1 };
+    (architecture_rank, locale_rank, command_rank)
+}
+
+fn architecture_rank(
+    installer_architecture: Option<&str>,
+    preferred_architecture: &str,
+    strict: bool,
+    system_architecture: &str,
+) -> i32 {
+    let Some(value) = installer_architecture else {
+        return 0;
+    };
+    if value.eq_ignore_ascii_case(preferred_architecture) {
+        return 5;
+    }
+    if value.eq_ignore_ascii_case("neutral") {
+        return 4;
+    }
+    if strict {
+        return -1;
+    }
+
+    preferred_architectures(system_architecture)
+        .iter()
+        .rev()
+        .position(|candidate| value.eq_ignore_ascii_case(candidate))
+        .map(|index| index as i32 + 1)
+        .unwrap_or(-1)
+}
+
+fn preferred_architectures(system_architecture: &str) -> &'static [&'static str] {
+    match system_architecture {
+        "arm64" => &["arm64", "neutral", "x64", "x86"],
+        "x64" => &["x64", "neutral", "x86"],
+        "x86" => &["x86", "neutral"],
+        _ => &["neutral"],
+    }
+}
+
+fn locale_rank(installer_locale: Option<&str>, requested_locale: Option<&str>) -> i32 {
+    match (installer_locale, requested_locale) {
+        (Some(installer), Some(requested)) if installer.eq_ignore_ascii_case(requested) => 3,
+        (Some(installer), Some(requested))
+            if installer
+                .split('-')
+                .next()
+                .zip(requested.split('-').next())
+                .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right)) =>
+        {
+            2
+        }
+        (None, Some(_)) => 1,
+        (Some(_), None) => 1,
+        (None, None) => 0,
+        _ => -1,
+    }
+}
+
+fn matches_optional_ci(value: Option<&str>, requested: Option<&str>) -> bool {
+    match requested {
+        Some(requested) => value.is_some_and(|value| value.eq_ignore_ascii_case(requested)),
+        None => true,
+    }
+}
+
+fn current_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "x86" => "x86",
+        "aarch64" => "arm64",
+        _ => "neutral",
+    }
 }
 
 fn select_v1_version(
@@ -2031,6 +3177,260 @@ mod tests {
         assert_eq!(
             compare_version("1.0.0-preview2", "1.0.0-preview1"),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn search_query_many_includes_tag_and_command_conditions() {
+        let query = PackageQuery {
+            query: Some("terminal".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let (where_clause, params) =
+            build_preindexed_where_clause(&query, true, SearchSemantics::Many);
+
+        assert!(where_clause.contains("tags2"));
+        assert!(where_clause.contains("commands2"));
+        assert_eq!(params.len(), 5);
+    }
+
+    #[test]
+    fn show_query_single_omits_tag_and_command_conditions() {
+        let query = PackageQuery {
+            query: Some("terminal".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let (where_clause, params) =
+            build_preindexed_where_clause(&query, true, SearchSemantics::Single);
+
+        assert!(!where_clause.contains("tags2"));
+        assert!(!where_clause.contains("commands2"));
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn selects_installer_using_requested_filters() {
+        let installers = vec![
+            Installer {
+                architecture: Some("x86".to_string()),
+                installer_type: Some("zip".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("msix".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                commands: vec!["demo".to_string()],
+                package_dependencies: Vec::new(),
+            },
+        ];
+        let query = PackageQuery {
+            installer_type: Some("msix".to_string()),
+            installer_architecture: Some("x64".to_string()),
+            install_scope: Some("user".to_string()),
+            locale: Some("en-US".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let selected = select_installer(&installers, &query).expect("selected installer");
+        assert_eq!(selected.installer_type.as_deref(), Some("msix"));
+        assert_eq!(selected.architecture.as_deref(), Some("x64"));
+    }
+
+    #[test]
+    fn derives_correlation_name_candidates() {
+        let candidates = correlation_name_candidates("PowerToys (Preview) x64");
+        assert!(candidates.contains(&"PowerToys (Preview) x64".to_string()));
+        assert!(candidates.contains(&"PowerToys".to_string()));
+    }
+
+    #[test]
+    fn correlates_installed_package_to_available_match() {
+        let installed = InstalledPackage {
+            name: "PowerToys (Preview) x64".to_string(),
+            local_id: r"ARP\Machine\X64\PowerToys".to_string(),
+            installed_version: "0.98.1".to_string(),
+            publisher: None,
+            scope: Some("Machine".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+        let candidates = vec![SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "Microsoft.PowerToys".to_string(),
+            name: "PowerToys".to_string(),
+            moniker: None,
+            version: Some("0.98.1".to_string()),
+            channel: None,
+            match_criteria: None,
+        }];
+
+        let correlated =
+            correlate_installed_package(&installed, &candidates, true).expect("correlated");
+        assert_eq!(correlated.id, "Microsoft.PowerToys");
+    }
+
+    #[test]
+    fn list_query_uses_available_lookup_for_tag_filters() {
+        let query = ListQuery {
+            tag: Some("terminal".to_string()),
+            ..ListQuery::default()
+        };
+
+        assert!(list_query_needs_available_lookup(&query));
+    }
+
+    #[test]
+    fn list_tag_filter_requires_correlated_match() {
+        let package = InstalledPackage {
+            name: "PowerToys (Preview) x64".to_string(),
+            local_id: r"ARP\Machine\X64\PowerToys".to_string(),
+            installed_version: "0.98.1".to_string(),
+            publisher: None,
+            scope: Some("Machine".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+        let query = ListQuery {
+            tag: Some("powertoys".to_string()),
+            ..ListQuery::default()
+        };
+
+        assert!(!list_package_matches(&package, &query));
+    }
+
+    #[test]
+    fn list_lookup_ignores_display_count() {
+        let query = ListQuery {
+            query: Some("git".to_string()),
+            count: Some(5),
+            ..ListQuery::default()
+        };
+
+        let package_query = package_query_from_list_query(&query);
+        assert_eq!(package_query.count, Some(LIST_LOOKUP_MAX_RESULTS));
+    }
+
+    #[test]
+    fn strict_list_correlation_avoids_short_substring_matches() {
+        let installed = InstalledPackage {
+            name: "GitHub".to_string(),
+            local_id: r"ARP\User\X64\GitHub".to_string(),
+            installed_version: "1.0.0".to_string(),
+            publisher: None,
+            scope: Some("User".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+        let candidates = vec![SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "Git.Git.PreRelease".to_string(),
+            name: "Git".to_string(),
+            moniker: None,
+            version: Some("2.54.0".to_string()),
+            channel: None,
+            match_criteria: None,
+        }];
+
+        assert!(correlate_installed_package(&installed, &candidates, false).is_none());
+    }
+
+    #[test]
+    fn detects_available_upgrade_from_correlated_package() {
+        let package = InstalledPackage {
+            name: "AzCopy v10".to_string(),
+            local_id: r"ARP\Machine\X64\AzCopy".to_string(),
+            installed_version: "10.32.2".to_string(),
+            publisher: None,
+            scope: Some("Machine".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: Some(SearchMatch {
+                source_name: "winget".to_string(),
+                source_kind: SourceKind::PreIndexed,
+                id: "Microsoft.Azure.AZCopy.10".to_string(),
+                name: "AzCopy v10".to_string(),
+                moniker: None,
+                version: Some("10.32.3".to_string()),
+                channel: None,
+                match_criteria: None,
+            }),
+        };
+
+        assert!(installed_package_has_upgrade(&package));
+    }
+
+    #[test]
+    fn include_unknown_treats_unknown_version_as_upgradable_when_correlated() {
+        let package = InstalledPackage {
+            name: "Example Tool".to_string(),
+            local_id: r"ARP\User\X64\ExampleTool".to_string(),
+            installed_version: "Unknown".to_string(),
+            publisher: None,
+            scope: Some("User".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: Some(SearchMatch {
+                source_name: "winget".to_string(),
+                source_kind: SourceKind::PreIndexed,
+                id: "Contoso.ExampleTool".to_string(),
+                name: "Example Tool".to_string(),
+                moniker: None,
+                version: Some("2.0.0".to_string()),
+                channel: None,
+                match_criteria: None,
+            }),
+        };
+        let query = ListQuery {
+            upgrade_only: true,
+            include_unknown: true,
+            ..Default::default()
+        };
+
+        assert!(installed_package_matches_upgrade_filter(&package, &query));
+        assert_eq!(
+            list_match_from_installed(package)
+                .available_version
+                .as_deref(),
+            Some("2.0.0")
         );
     }
 }

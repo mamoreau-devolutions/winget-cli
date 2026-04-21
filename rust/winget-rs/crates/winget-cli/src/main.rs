@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use winget_core::{
-    CacheWarmResult, PackageQuery, Repository, SearchResponse, ShowResult, SourceRecord,
-    SourceUpdateResult, VersionsResult,
+    CacheWarmResult, Documentation, ListQuery, ListResponse, PackageQuery, Repository,
+    SearchResponse, ShowResult, SourceRecord, SourceUpdateResult, VersionsResult,
 };
 
 #[derive(Parser)]
-#[command(name = "winget-rs", about = "Pure Rust subset of the winget CLI")]
+#[command(name = "winget", about = "Pure Rust subset of the winget CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -14,8 +14,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(alias = "ls")]
+    List(ListArgs),
     Show(ShowArgs),
-    Search(QueryArgs),
+    Search(SearchArgs),
     Source {
         #[command(subcommand)]
         command: SourceCommands,
@@ -47,7 +49,40 @@ struct ShowArgs {
 
 #[derive(Args, Clone)]
 struct QueryArgs {
+    #[arg(conflicts_with = "query_option")]
     query: Option<String>,
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    query_option: Option<String>,
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    moniker: Option<String>,
+    #[arg(long, short = 's')]
+    source: Option<String>,
+    #[arg(long, short = 'e')]
+    exact: bool,
+    #[arg(long, short = 'v')]
+    version: Option<String>,
+    #[arg(long, short = 'c')]
+    channel: Option<String>,
+    #[arg(long)]
+    locale: Option<String>,
+    #[arg(long = "installer-type")]
+    installer_type: Option<String>,
+    #[arg(long = "architecture", short = 'a')]
+    installer_architecture: Option<String>,
+    #[arg(long = "scope")]
+    install_scope: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchArgs {
+    #[arg(conflicts_with = "query_option")]
+    query: Option<String>,
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
     #[arg(long)]
@@ -55,13 +90,51 @@ struct QueryArgs {
     #[arg(long)]
     moniker: Option<String>,
     #[arg(long)]
+    tag: Option<String>,
+    #[arg(long, visible_alias = "cmd")]
+    command: Option<String>,
+    #[arg(long, short = 's')]
     source: Option<String>,
-    #[arg(long)]
+    #[arg(long, short = 'n')]
+    count: Option<usize>,
+    #[arg(long, short = 'e')]
     exact: bool,
+    #[arg(long = "versions")]
+    versions: bool,
+}
+
+#[derive(Args, Clone)]
+struct ListArgs {
+    #[arg(conflicts_with = "query_option")]
+    query: Option<String>,
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    query_option: Option<String>,
     #[arg(long)]
-    version: Option<String>,
+    id: Option<String>,
     #[arg(long)]
-    channel: Option<String>,
+    name: Option<String>,
+    #[arg(long)]
+    moniker: Option<String>,
+    #[arg(long)]
+    tag: Option<String>,
+    #[arg(long, visible_alias = "cmd")]
+    command: Option<String>,
+    #[arg(long, short = 's')]
+    source: Option<String>,
+    #[arg(long, short = 'n')]
+    count: Option<usize>,
+    #[arg(long, short = 'e')]
+    exact: bool,
+    #[arg(long = "scope")]
+    install_scope: Option<String>,
+    #[arg(long = "upgrade-available")]
+    upgrade: bool,
+    #[arg(long = "include-unknown", short = 'u', visible_alias = "unknown")]
+    include_unknown: bool,
+    #[arg(long = "include-pinned", visible_alias = "pinned")]
+    include_pinned: bool,
+    #[arg(long = "details")]
+    details: bool,
 }
 
 fn main() {
@@ -76,6 +149,9 @@ fn run() -> Result<()> {
     let mut repository = Repository::open()?;
 
     match cli.command {
+        Commands::List(args) => {
+            print_list_result(repository.list(&args.clone().into())?, args.details);
+        }
         Commands::Show(args) => {
             if args.versions {
                 print_versions(repository.show_versions(&args.query.into())?);
@@ -84,7 +160,11 @@ fn run() -> Result<()> {
             }
         }
         Commands::Search(args) => {
-            print_search(repository.search(&args.into())?);
+            if args.versions {
+                print_versions(repository.search_versions(&args.clone().into())?);
+            } else {
+                print_search(repository.search(&args.into())?);
+            }
         }
         Commands::Source { command } => match command {
             SourceCommands::List => print_sources(repository.list_sources()),
@@ -103,14 +183,63 @@ fn run() -> Result<()> {
 impl From<QueryArgs> for PackageQuery {
     fn from(value: QueryArgs) -> Self {
         Self {
-            query: value.query,
+            query: value.query.or(value.query_option),
             id: value.id,
             name: value.name,
             moniker: value.moniker,
+            tag: None,
+            command: None,
             source: value.source,
+            count: None,
             exact: value.exact,
             version: value.version,
             channel: value.channel,
+            locale: value.locale,
+            installer_type: value.installer_type,
+            installer_architecture: value.installer_architecture,
+            install_scope: value.install_scope,
+        }
+    }
+}
+
+impl From<SearchArgs> for PackageQuery {
+    fn from(value: SearchArgs) -> Self {
+        Self {
+            query: value.query.or(value.query_option),
+            id: value.id,
+            name: value.name,
+            moniker: value.moniker,
+            tag: value.tag,
+            command: value.command,
+            source: value.source,
+            count: value.count,
+            exact: value.exact,
+            version: None,
+            channel: None,
+            locale: None,
+            installer_type: None,
+            installer_architecture: None,
+            install_scope: None,
+        }
+    }
+}
+
+impl From<ListArgs> for ListQuery {
+    fn from(value: ListArgs) -> Self {
+        Self {
+            query: value.query.or(value.query_option),
+            id: value.id,
+            name: value.name,
+            moniker: value.moniker,
+            tag: value.tag,
+            command: value.command,
+            source: value.source,
+            count: value.count,
+            exact: value.exact,
+            install_scope: value.install_scope,
+            upgrade_only: value.upgrade,
+            include_unknown: value.include_unknown,
+            include_pinned: value.include_pinned,
         }
     }
 }
@@ -141,36 +270,137 @@ fn print_search(result: SearchResponse) {
         return;
     }
 
-    println!("{:<36} {:<42} {:<18} Source", "Name", "Id", "Version");
-    for item in result.matches {
+    let show_match_column = result
+        .matches
+        .iter()
+        .any(|item| item.match_criteria.as_deref().is_some());
+    if show_match_column {
         println!(
-            "{:<36} {:<42} {:<18} {}",
-            truncate(&item.name, 36),
-            truncate(&item.id, 42),
-            item.version.unwrap_or_default(),
-            item.source_name
+            "{:<32} {:<40} {:<18} {:<24} Source",
+            "Name", "Id", "Version", "Match"
         );
+        for item in result.matches {
+            println!(
+                "{:<32} {:<40} {:<18} {:<24} {}",
+                truncate(&item.name, 32),
+                truncate(&item.id, 40),
+                item.version.unwrap_or_default(),
+                truncate(item.match_criteria.as_deref().unwrap_or_default(), 24),
+                item.source_name
+            );
+        }
+    } else {
+        println!("{:<36} {:<42} {:<18} Source", "Name", "Id", "Version");
+        for item in result.matches {
+            println!(
+                "{:<36} {:<42} {:<18} {}",
+                truncate(&item.name, 36),
+                truncate(&item.id, 42),
+                item.version.unwrap_or_default(),
+                item.source_name
+            );
+        }
+    }
+
+    if result.truncated {
+        eprintln!("warning: search results were truncated");
+    }
+}
+
+fn print_list_result(result: ListResponse, details: bool) {
+    print_warnings(&result.warnings);
+    if result.matches.is_empty() {
+        println!("No installed package found.");
+        return;
+    }
+
+    if details {
+        let total = result.matches.len();
+        for (index, item) in result.matches.iter().enumerate() {
+            if total > 1 {
+                println!("({}/{}) {} [{}]", index + 1, total, item.name, item.id);
+            } else {
+                println!("{} [{}]", item.name, item.id);
+            }
+            print_field("Version", &item.installed_version);
+            if let Some(value) = &item.publisher {
+                print_field("Publisher", value);
+            }
+            if item.local_id != item.id {
+                print_field("Local Identifier", &item.local_id);
+            }
+            if !item.package_family_names.is_empty() {
+                print_field("Package Family Name", &item.package_family_names.join(", "));
+            }
+            if !item.product_codes.is_empty() {
+                print_field("Product Code", &item.product_codes.join(", "));
+            }
+            if !item.upgrade_codes.is_empty() {
+                print_field("Upgrade Code", &item.upgrade_codes.join(", "));
+            }
+            if let Some(value) = &item.installer_category {
+                print_field("Installer Category", value);
+            }
+            if let Some(value) = &item.scope {
+                print_field("Installed Scope", value);
+            }
+            if let Some(value) = &item.install_location {
+                print_field("Installed Location", value);
+            }
+            if let Some(value) = &item.source_name {
+                print_field("Source", value);
+            }
+            if let Some(value) = &item.available_version {
+                print_field("Available", value);
+            }
+        }
+    } else {
+        println!(
+            "{:<36} {:<42} {:<18} {:<12} Source",
+            "Name", "Id", "Version", "Available"
+        );
+        for item in result.matches {
+            println!(
+                "{:<36} {:<42} {:<18} {:<12} {}",
+                truncate(&item.name, 36),
+                truncate(&item.id, 42),
+                truncate(&item.installed_version, 18),
+                truncate(item.available_version.as_deref().unwrap_or_default(), 12),
+                item.source_name.unwrap_or_default()
+            );
+        }
+    }
+
+    if result.truncated {
+        eprintln!("warning: list results were truncated");
     }
 }
 
 fn print_versions(result: VersionsResult) {
     print_warnings(&result.warnings);
-    println!(
-        "{} [{}] ({})",
-        result.package.name, result.package.id, result.package.source_name
-    );
-    println!("{:<20} Channel", "Version");
-    for version in result.versions {
-        println!("{:<20} {}", version.version, version.channel);
+    println!("Found {} [{}]", result.package.name, result.package.id);
+    let show_channel = result
+        .versions
+        .iter()
+        .any(|version| !version.channel.is_empty());
+    if show_channel {
+        println!("{:<20} Channel", "Version");
+        for version in result.versions {
+            println!("{:<20} {}", version.version, version.channel);
+        }
+    } else {
+        println!("Version");
+        println!("-------");
+        for version in result.versions {
+            println!("{}", version.version);
+        }
     }
 }
 
 fn print_show(result: ShowResult) {
     print_warnings(&result.warnings);
-    println!(
-        "{} [{}] ({})",
-        result.package.name, result.package.id, result.package.source_name
-    );
+    println!("Found {} [{}]", result.package.name, result.package.id);
+    print_field("Source", &result.package.source_name);
     print_field("Version", &result.manifest.version);
     if !result.manifest.channel.is_empty() {
         print_field("Channel", &result.manifest.channel);
@@ -187,14 +417,20 @@ fn print_show(result: ShowResult) {
     if let Some(value) = &result.manifest.author {
         print_field("Author", value);
     }
+    if let Some(value) = &result.manifest.copyright {
+        print_field("Copyright", value);
+    }
+    if let Some(value) = &result.manifest.copyright_url {
+        print_field("Copyright Url", value);
+    }
     if let Some(value) = &result.manifest.moniker {
         print_field("Moniker", value);
     }
     if let Some(value) = &result.manifest.description {
-        print_multiline("Description", value);
+        print_multiline_with_colon("Description", value);
     }
     if let Some(value) = &result.manifest.package_url {
-        print_field("Package Url", value);
+        print_field("Homepage", value);
     }
     if let Some(value) = &result.manifest.license {
         print_field("License", value);
@@ -206,17 +442,24 @@ fn print_show(result: ShowResult) {
         print_field("Privacy Url", value);
     }
     if let Some(value) = &result.manifest.release_notes {
-        print_multiline("Release Notes", value);
+        print_multiline_with_colon("Release Notes", value);
     }
     if let Some(value) = &result.manifest.release_notes_url {
         print_field("Release Notes Url", value);
     }
     if !result.manifest.tags.is_empty() {
-        print_field("Tags", &result.manifest.tags.join(", "));
+        print_list("Tags", &result.manifest.tags);
     }
+    if !result.manifest.package_dependencies.is_empty() {
+        print_field(
+            "Dependencies",
+            &result.manifest.package_dependencies.join(", "),
+        );
+    }
+    print_documentation(&result.manifest.documentation);
 
-    if let Some(installer) = result.manifest.installers.first() {
-        println!("Installer");
+    println!("Installer:");
+    if let Some(installer) = result.selected_installer.as_ref() {
         if let Some(value) = &installer.installer_type {
             print_indented_field("Type", value);
         }
@@ -238,9 +481,23 @@ fn print_show(result: ShowResult) {
         if let Some(value) = &installer.product_code {
             print_indented_field("ProductCode", value);
         }
+        if let Some(value) = &installer.package_family_name {
+            print_indented_field("PackageFamilyName", value);
+        }
+        if let Some(value) = &installer.upgrade_code {
+            print_indented_field("UpgradeCode", value);
+        }
         if let Some(value) = &installer.release_date {
             print_indented_field("ReleaseDate", value);
         }
+        if !installer.commands.is_empty() {
+            print_indented_field("Commands", &installer.commands.join(", "));
+        }
+        if !installer.package_dependencies.is_empty() {
+            print_indented_field("Dependencies", &installer.package_dependencies.join(", "));
+        }
+    } else if !result.manifest.installers.is_empty() {
+        println!("  No applicable installer found; see logs for more details.");
     }
 }
 
@@ -270,10 +527,31 @@ fn print_indented_field(label: &str, value: &str) {
     println!("  {label:<20} {value}");
 }
 
-fn print_multiline(label: &str, value: &str) {
-    println!("{label}");
+fn print_multiline_with_colon(label: &str, value: &str) {
+    println!("{label}:");
     for line in value.lines() {
         println!("  {line}");
+    }
+}
+
+fn print_list(label: &str, values: &[String]) {
+    println!("{label}:");
+    for value in values {
+        println!("  {value}");
+    }
+}
+
+fn print_documentation(entries: &[Documentation]) {
+    if entries.is_empty() {
+        return;
+    }
+
+    println!("Documentation:");
+    for entry in entries {
+        match entry.label.as_deref() {
+            Some(label) if !label.is_empty() => println!("  {label:<20} {}", entry.url),
+            _ => println!("  {}", entry.url),
+        }
     }
 }
 
