@@ -11,3 +11,6 @@ path = "src/main.rs"
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 winget-core = { version = "0.1.0", path = "../winget-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }

@@ -165,7 +165,11 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::List(args) => {
-            print_list_result(repository.list(&args.clone().into())?, args.details);
+            print_list_result(
+                repository.list(&args.clone().into())?,
+                args.details,
+                args.upgrade,
+            );
         }
         Commands::Show(args) => {
             if args.versions {
@@ -318,20 +322,28 @@ fn print_search(result: SearchResponse) {
     }
 
     if result.truncated {
-        eprintln!("warning: search results were truncated");
+        println!("<additional entries truncated due to result limit>");
     }
 }
 
-fn print_list_result(result: ListResponse, details: bool) {
-    print_warnings(&result.warnings);
-    if result.matches.is_empty() {
+fn print_list_result(result: ListResponse, details: bool, upgrade_only: bool) {
+    let ListResponse {
+        matches,
+        warnings,
+        truncated,
+    } = result;
+
+    print_warnings(&warnings);
+    if matches.is_empty() {
         println!("No installed package found.");
         return;
     }
 
+    let match_count = matches.len();
+
     if details {
-        let total = result.matches.len();
-        for (index, item) in result.matches.iter().enumerate() {
+        let total = matches.len();
+        for (index, item) in matches.iter().enumerate() {
             if total > 1 {
                 println!("({}/{}) {} [{}]", index + 1, total, item.name, item.id);
             } else {
@@ -370,24 +382,46 @@ fn print_list_result(result: ListResponse, details: bool) {
             }
         }
     } else {
-        println!(
-            "{:<36} {:<42} {:<18} {:<12} Source",
-            "Name", "Id", "Version", "Available"
-        );
-        for item in result.matches {
-            println!(
-                "{:<36} {:<42} {:<18} {:<12} {}",
-                truncate(&item.name, 36),
-                truncate(&item.id, 42),
-                truncate(&item.installed_version, 18),
-                truncate(item.available_version.as_deref().unwrap_or_default(), 12),
-                item.source_name.unwrap_or_default()
-            );
+        let show_available = matches.iter().any(|item| {
+            item.available_version
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        });
+        if show_available {
+            let rows = matches
+                .into_iter()
+                .map(|item| {
+                    vec![
+                        item.name,
+                        item.id,
+                        item.installed_version,
+                        item.available_version.unwrap_or_default(),
+                        item.source_name.unwrap_or_default(),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            print_table(&["Name", "Id", "Version", "Available", "Source"], &rows);
+        } else {
+            let rows = matches
+                .into_iter()
+                .map(|item| {
+                    vec![
+                        item.name,
+                        item.id,
+                        item.installed_version,
+                        item.source_name.unwrap_or_default(),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            print_table(&["Name", "Id", "Version", "Source"], &rows);
         }
     }
 
-    if result.truncated {
-        eprintln!("warning: list results were truncated");
+    if truncated {
+        println!("<additional entries truncated due to result limit>");
+    }
+    if upgrade_only {
+        println!("{} upgrades available.", match_count);
     }
 }
 
@@ -415,7 +449,6 @@ fn print_versions(result: VersionsResult) {
 fn print_show(result: ShowResult) {
     print_warnings(&result.warnings);
     println!("Found {} [{}]", result.package.name, result.package.id);
-    print_field("Source", &result.package.source_name);
     print_field("Version", &result.manifest.version);
     if !result.manifest.channel.is_empty() {
         print_field("Channel", &result.manifest.channel);
@@ -431,12 +464,6 @@ fn print_show(result: ShowResult) {
     }
     if let Some(value) = &result.manifest.author {
         print_field("Author", value);
-    }
-    if let Some(value) = &result.manifest.copyright {
-        print_field("Copyright", value);
-    }
-    if let Some(value) = &result.manifest.copyright_url {
-        print_field("Copyright Url", value);
     }
     if let Some(value) = &result.manifest.moniker {
         print_field("Moniker", value);
@@ -456,14 +483,17 @@ fn print_show(result: ShowResult) {
     if let Some(value) = &result.manifest.privacy_url {
         print_field("Privacy Url", value);
     }
+    if let Some(value) = &result.manifest.copyright {
+        print_field("Copyright", value);
+    }
+    if let Some(value) = &result.manifest.copyright_url {
+        print_field("Copyright Url", value);
+    }
     if let Some(value) = &result.manifest.release_notes {
         print_multiline_with_colon("Release Notes", value);
     }
     if let Some(value) = &result.manifest.release_notes_url {
         print_field("Release Notes Url", value);
-    }
-    if !result.manifest.tags.is_empty() {
-        print_list("Tags", &result.manifest.tags);
     }
     if !result.manifest.package_dependencies.is_empty() {
         print_field(
@@ -472,6 +502,9 @@ fn print_show(result: ShowResult) {
         );
     }
     print_documentation(&result.manifest.documentation);
+    if !result.manifest.tags.is_empty() {
+        print_list("Tags", &result.manifest.tags);
+    }
 
     println!("Installer:");
     if let Some(installer) = result.selected_installer.as_ref() {
@@ -535,11 +568,11 @@ fn print_warnings(warnings: &[String]) {
 }
 
 fn print_field(label: &str, value: &str) {
-    println!("{label:<22} {value}");
+    println!("{label}: {value}");
 }
 
 fn print_indented_field(label: &str, value: &str) {
-    println!("  {label:<20} {value}");
+    println!("  {label}: {value}");
 }
 
 fn print_multiline_with_colon(label: &str, value: &str) {
@@ -564,10 +597,186 @@ fn print_documentation(entries: &[Documentation]) {
     println!("Documentation:");
     for entry in entries {
         match entry.label.as_deref() {
-            Some(label) if !label.is_empty() => println!("  {label:<20} {}", entry.url),
+            Some(label) if !label.is_empty() => println!("  {label}: {}", entry.url),
             _ => println!("  {}", entry.url),
         }
     }
+}
+
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    if headers.is_empty() {
+        return;
+    }
+
+    let mut widths = headers
+        .iter()
+        .map(|header| display_width(header))
+        .collect::<Vec<_>>();
+    let mut has_data = vec![false; headers.len()];
+
+    for row in rows {
+        for (index, value) in row.iter().enumerate() {
+            if !value.is_empty() {
+                has_data[index] = true;
+                widths[index] = widths[index].max(display_width(value));
+            }
+        }
+    }
+
+    for (index, width) in widths.iter_mut().enumerate() {
+        if !has_data[index] {
+            *width = 0;
+        }
+    }
+
+    let mut space_after = vec![true; headers.len()];
+    if let Some(last) = space_after.last_mut() {
+        *last = false;
+    }
+    for index in (1..headers.len()).rev() {
+        if widths[index] == 0 {
+            space_after[index - 1] = false;
+        } else {
+            break;
+        }
+    }
+
+    let mut total_required = table_total_width(&widths, &space_after);
+    let console_width = get_console_width();
+    if total_required >= console_width {
+        let mut extra = (total_required - console_width) + 1;
+        while extra > 0 {
+            let mut target_index = 0;
+            let mut target_width = widths[0];
+            for (index, width) in widths.iter().copied().enumerate().skip(1) {
+                if width > target_width {
+                    target_index = index;
+                    target_width = width;
+                }
+            }
+
+            if widths[target_index] > 1 {
+                widths[target_index] -= 1;
+            }
+            extra -= 1;
+        }
+
+        total_required = console_width.saturating_sub(1);
+    }
+
+    let header_row = headers
+        .iter()
+        .map(|header| header.to_string())
+        .collect::<Vec<_>>();
+    print_table_line(&header_row, &widths, &space_after);
+    println!("{}", "-".repeat(total_required));
+    for row in rows {
+        print_table_line(row, &widths, &space_after);
+    }
+}
+
+fn print_table_line(values: &[String], widths: &[usize], space_after: &[bool]) {
+    let mut line = String::new();
+
+    for (index, value) in values.iter().enumerate() {
+        let width = widths[index];
+        if width == 0 {
+            continue;
+        }
+
+        let value_width = display_width(value);
+        if value_width > width {
+            line.push_str(&truncate(value, width));
+            if space_after[index] {
+                line.push(' ');
+            }
+        } else {
+            line.push_str(value);
+            if space_after[index] {
+                line.push_str(&" ".repeat(width - value_width + 1));
+            }
+        }
+    }
+
+    println!("{line}");
+}
+
+fn table_total_width(widths: &[usize], space_after: &[bool]) -> usize {
+    widths
+        .iter()
+        .zip(space_after.iter())
+        .map(|(width, space)| width + usize::from(*space))
+        .sum()
+}
+
+fn get_console_width() -> usize {
+    get_console_width_impl()
+}
+
+fn display_width(value: &str) -> usize {
+    value.chars().count()
+}
+
+#[cfg(windows)]
+fn get_console_width_impl() -> usize {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+
+    unsafe {
+        let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if let Some(width) = try_console_width(stdout_handle) {
+            return width;
+        }
+
+        let mut conout = "CONOUT$\0".encode_utf16().collect::<Vec<_>>();
+        let console_handle = CreateFileW(
+            conout.as_mut_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if console_handle.is_null() || console_handle == INVALID_HANDLE_VALUE {
+            return 119;
+        }
+
+        let width = try_console_width(console_handle).unwrap_or(119);
+        CloseHandle(console_handle);
+        width
+    }
+}
+
+#[cfg(windows)]
+unsafe fn try_console_width(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<usize> {
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
+    };
+
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { zeroed() };
+    if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
+        return None;
+    }
+
+    usize::try_from(info.dwSize.X)
+        .ok()
+        .and_then(|width| width.checked_sub(2))
+        .filter(|width| *width > 0)
+}
+
+#[cfg(not(windows))]
+fn get_console_width_impl() -> usize {
+    120
 }
 
 fn truncate(value: &str, width: usize) -> String {

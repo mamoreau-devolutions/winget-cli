@@ -65,7 +65,13 @@ function Normalize-WingetOutput {
         if ($trimmed -like 'Failed in attempting to update the source:*') {
             continue
         }
-        $trimmed
+        if ($trimmed -like 'Failed when searching source*') {
+            continue
+        }
+        if ($trimmed -like 'warning:*REST search request failed*') {
+            continue
+        }
+        ($trimmed -replace '\s+', ' ')
     }
 }
 

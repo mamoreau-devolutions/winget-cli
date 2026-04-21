@@ -441,9 +441,13 @@ impl Repository {
             .collect::<Vec<_>>();
 
         matches.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
+            list_sort_weight(left)
+                .cmp(&list_sort_weight(right))
+                .then_with(|| {
+                    left.name
+                        .to_ascii_lowercase()
+                        .cmp(&right.name.to_ascii_lowercase())
+                })
                 .then_with(|| left.local_id.cmp(&right.local_id))
         });
 
@@ -557,9 +561,10 @@ impl Repository {
                     truncated |= source_matches.truncated;
                     matches.append(&mut source_matches.matches);
                 }
-                Err(error) => {
-                    warnings.push(format!("{}: {error:#}", self.store.sources[index].name))
-                }
+                Err(_error) => warnings.push(format!(
+                    "Failed when searching source; results will not be included: {}",
+                    self.store.sources[index].name
+                )),
             }
         }
 
@@ -804,7 +809,7 @@ impl Repository {
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_default();
-        let max_results = max_results(query);
+        let max_results = source_fetch_results(query, semantics);
 
         let mut results = Vec::new();
         for item in data {
@@ -1280,6 +1285,16 @@ fn list_match_from_installed(package: InstalledPackage) -> ListMatch {
     }
 }
 
+fn list_sort_weight(package: &InstalledPackage) -> usize {
+    if package.local_id.starts_with("ARP\\") {
+        0
+    } else if package.name.contains(".SparseApp") || package.local_id.contains(".SparseApp_") {
+        1
+    } else {
+        2
+    }
+}
+
 fn list_package_matches(package: &InstalledPackage, query: &ListQuery) -> bool {
     let correlated = package.correlated.as_ref();
 
@@ -1595,7 +1610,7 @@ fn collect_appmodel_packages(
             continue;
         };
 
-        let local_id = format!(r"MSIX\{scope}\{key_name}");
+        let local_id = format!(r"MSIX\{key_name}");
         let dedupe_key = format!(
             "{}|{}|{}",
             local_id,
@@ -1903,7 +1918,7 @@ fn query_v2_matches(
     semantics: SearchSemantics,
 ) -> Result<(Vec<V2SearchRow>, bool)> {
     let (where_clause, params) = build_preindexed_where_clause(query, true, semantics);
-    let limit = max_results(query);
+    let limit = source_fetch_results(query, semantics);
     let sql = format!(
         "SELECT rowid, id, name, moniker, latest_version, hash \
          FROM packages WHERE {where_clause} LIMIT {}",
@@ -1939,7 +1954,7 @@ fn query_v1_matches(
     semantics: SearchSemantics,
 ) -> Result<(Vec<V1SearchRow>, bool)> {
     let (where_clause, params) = build_preindexed_where_clause(query, false, semantics);
-    let limit = max_results(query);
+    let limit = source_fetch_results(query, semantics);
     let sql = format!(
         "SELECT manifest.rowid, manifest.id, versions.version, channels.channel, ids.id, names.name, monikers.moniker \
          FROM manifest \
@@ -2113,13 +2128,13 @@ fn build_preindexed_where_clause(
     }
     if let Some(value) = &query.tag {
         return (
-            mapped_field_condition(v2, "tag", value, rowid_column, exact_match, &mut params),
+            mapped_field_condition(v2, "tag", value, rowid_column, true, &mut params),
             params,
         );
     }
     if let Some(value) = &query.command {
         return (
-            mapped_field_condition(v2, "command", value, rowid_column, exact_match, &mut params),
+            mapped_field_condition(v2, "command", value, rowid_column, true, &mut params),
             params,
         );
     }
@@ -2221,7 +2236,7 @@ fn build_rest_search_body(
     let mut root = serde_json::Map::new();
     root.insert(
         "MaximumResults".to_string(),
-        JsonValue::from(max_results(query) as u64),
+        JsonValue::from(source_fetch_results(query, semantics) as u64),
     );
     let exact_match = query.exact || semantics == SearchSemantics::Single;
 
@@ -2257,10 +2272,10 @@ fn build_rest_search_body(
         filters.push(rest_filter("Moniker", value, exact_match));
     }
     if let Some(value) = &query.tag {
-        filters.push(rest_filter("Tag", value, exact_match));
+        filters.push(rest_filter("Tag", value, true));
     }
     if let Some(value) = &query.command {
-        filters.push(rest_filter("Command", value, exact_match));
+        filters.push(rest_filter("Command", value, true));
     }
     append_required_rest_filters(&mut filters, info);
 
@@ -2295,6 +2310,13 @@ fn max_results(query: &PackageQuery) -> usize {
     query.count.unwrap_or(DEFAULT_MAX_RESULTS).max(1)
 }
 
+fn source_fetch_results(query: &PackageQuery, semantics: SearchSemantics) -> usize {
+    match semantics {
+        SearchSemantics::Many => max_results(query).max(DEFAULT_MAX_RESULTS),
+        SearchSemantics::Single => max_results(query),
+    }
+}
+
 fn infer_preindexed_match_criteria_v2(
     connection: &Connection,
     row: &V2SearchRow,
@@ -2302,6 +2324,8 @@ fn infer_preindexed_match_criteria_v2(
     semantics: SearchSemantics,
 ) -> Result<Option<String>> {
     infer_match_criteria(
+        &row.id,
+        &row.name,
         row.moniker.as_deref(),
         query,
         semantics,
@@ -2337,6 +2361,8 @@ fn infer_preindexed_match_criteria_v1(
     semantics: SearchSemantics,
 ) -> Result<Option<String>> {
     infer_match_criteria(
+        &row.id,
+        &row.name,
         row.moniker.as_deref(),
         query,
         semantics,
@@ -2366,6 +2392,8 @@ fn infer_preindexed_match_criteria_v1(
 }
 
 fn infer_match_criteria<FTag, FCommand>(
+    id: &str,
+    name: &str,
     moniker: Option<&str>,
     query: &PackageQuery,
     semantics: SearchSemantics,
@@ -2392,6 +2420,9 @@ where
         return Ok(None);
     }
     if let Some(value) = &query.query {
+        if matches_text(id, value, query.exact) || matches_text(name, value, query.exact) {
+            return Ok(None);
+        }
         if let Some(moniker_value) =
             moniker.filter(|candidate| matches_text(candidate, value, query.exact))
         {
@@ -2419,9 +2450,9 @@ fn find_mapped_value_v2(
     let sql = format!(
         "SELECT {table_name}.{value_name} FROM {map_table_name} \
          JOIN {table_name} ON {map_table_name}.{value_name} = {table_name}.rowid \
-         WHERE {map_table_name}.package = ?1 AND {table_name}.{value_name} LIKE ?2 LIMIT 1"
+         WHERE {map_table_name}.package = ?1 AND {table_name}.{value_name} LIKE ?2"
     );
-    query_optional_value(
+    let values = query_rows(
         connection,
         &sql,
         vec![
@@ -2429,7 +2460,8 @@ fn find_mapped_value_v2(
             SqlValue::Text(match_parameter(query, exact)),
         ],
         |row| row_string(row, 0),
-    )
+    )?;
+    Ok(select_best_text_match(values, query, exact))
 }
 
 fn find_mapped_value_v1(
@@ -2444,9 +2476,9 @@ fn find_mapped_value_v1(
     let sql = format!(
         "SELECT {table_name}.{value_name} FROM {map_table_name} \
          JOIN {table_name} ON {map_table_name}.{value_name} = {table_name}.rowid \
-         WHERE {map_table_name}.manifest = ?1 AND {table_name}.{value_name} LIKE ?2 LIMIT 1"
+         WHERE {map_table_name}.manifest = ?1 AND {table_name}.{value_name} LIKE ?2"
     );
-    query_optional_value(
+    let values = query_rows(
         connection,
         &sql,
         vec![
@@ -2454,7 +2486,8 @@ fn find_mapped_value_v1(
             SqlValue::Text(match_parameter(query, exact)),
         ],
         |row| row_string(row, 0),
-    )
+    )?;
+    Ok(select_best_text_match(values, query, exact))
 }
 
 fn rest_match_criteria(
@@ -2475,6 +2508,15 @@ fn rest_match_criteria(
         return None;
     }
     let value = query.query.as_deref()?;
+    if json_string(item, "PackageIdentifier")
+        .as_deref()
+        .is_some_and(|candidate| matches_text(candidate, value, query.exact))
+        || json_string(item, "PackageName")
+            .as_deref()
+            .is_some_and(|candidate| matches_text(candidate, value, query.exact))
+    {
+        return None;
+    }
     json_string(item, "Moniker")
         .filter(|candidate| matches_text(candidate, value, query.exact))
         .map(|candidate| format_match_criteria("Moniker", &candidate))
@@ -2503,19 +2545,19 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
             value,
             query.exact,
             140,
-            120,
-            100,
+            50,
+            30,
         ));
         score = score.max(score_text_match(
             &candidate.id,
             value,
             query.exact,
             135,
-            115,
-            95,
+            45,
+            25,
         ));
         if let Some(moniker) = candidate.moniker.as_deref() {
-            score = score.max(score_text_match(moniker, value, query.exact, 130, 110, 90));
+            score = score.max(score_text_match(moniker, value, query.exact, 130, 55, 35));
         }
         if let Some((field, matched_value)) = candidate
             .match_criteria
@@ -2525,7 +2567,7 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
             let field_score = match field {
                 "Tag" => score_text_match(matched_value, value, query.exact, 60, 50, 40),
                 "Command" => score_text_match(matched_value, value, query.exact, 55, 45, 35),
-                "Moniker" => score_text_match(matched_value, value, query.exact, 125, 105, 85),
+                "Moniker" => score_text_match(matched_value, value, query.exact, 125, 55, 35),
                 _ => 0,
             };
             score = score.max(field_score);
@@ -2590,7 +2632,21 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
         }
     }
 
+    if matches!(candidate.source_kind, SourceKind::PreIndexed) {
+        score += 5;
+    }
+    if search_match_has_unknown_version(candidate) {
+        score = score.saturating_sub(40);
+    }
+
     score
+}
+
+fn search_match_has_unknown_version(candidate: &SearchMatch) -> bool {
+    candidate
+        .version
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("Unknown"))
 }
 
 fn score_text_match(
@@ -2617,6 +2673,29 @@ fn score_text_match(
     } else {
         0
     }
+}
+
+fn select_best_text_match<I>(values: I, query: &str, exact: bool) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    values
+        .into_iter()
+        .filter_map(|candidate| {
+            let score = score_text_match(&candidate, query, exact, 3, 2, 1);
+            (score > 0).then_some((score, candidate))
+        })
+        .max_by(|(left_score, left_value), (right_score, right_value)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| right_value.len().cmp(&left_value.len()))
+                .then_with(|| {
+                    right_value
+                        .to_ascii_lowercase()
+                        .cmp(&left_value.to_ascii_lowercase())
+                })
+        })
+        .map(|(_, candidate)| candidate)
 }
 
 fn parse_match_criteria(criteria: &str) -> Option<(&str, &str)> {
@@ -3467,6 +3546,42 @@ mod tests {
     }
 
     #[test]
+    fn explicit_tag_filter_uses_exact_match() {
+        let query = PackageQuery {
+            tag: Some("terminal".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let (where_clause, params) =
+            build_preindexed_where_clause(&query, true, SearchSemantics::Many);
+
+        assert!(where_clause.contains("tags2"));
+        assert_eq!(params, vec!["terminal".to_string()]);
+    }
+
+    #[test]
+    fn rest_tag_filter_uses_exact_match() {
+        let query = PackageQuery {
+            tag: Some("terminal".to_string()),
+            ..PackageQuery::default()
+        };
+        let info = RestInformation {
+            required_package_match_fields: Vec::new(),
+            unsupported_package_match_fields: Vec::new(),
+            required_query_parameters: Vec::new(),
+            ..RestInformation::default()
+        };
+
+        let body = build_rest_search_body(&query, &info, SearchSemantics::Many).expect("rest body");
+        let filters = body["Filters"].as_array().expect("filters");
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["PackageMatchField"], "Tag");
+        assert_eq!(filters[0]["RequestMatch"]["MatchType"], "Exact");
+        assert_eq!(filters[0]["RequestMatch"]["KeyWord"], "terminal");
+    }
+
+    #[test]
     fn selects_installer_using_requested_filters() {
         let installers = vec![
             Installer {
@@ -3743,5 +3858,166 @@ mod tests {
             search_match_sort_score(&exact_name, &query)
                 > search_match_sort_score(&tag_match, &query)
         );
+    }
+
+    #[test]
+    fn select_best_text_match_prefers_exact_tag_value() {
+        let values = vec![
+            "microsoft-powertoys".to_string(),
+            "powertoys-run".to_string(),
+            "powertoys".to_string(),
+        ];
+
+        assert_eq!(
+            select_best_text_match(values, "PowerToys", false).as_deref(),
+            Some("powertoys")
+        );
+    }
+
+    #[test]
+    fn search_match_criteria_is_blank_for_name_match() {
+        let query = PackageQuery {
+            query: Some("PowerToys".to_string()),
+            ..Default::default()
+        };
+
+        let result = infer_match_criteria(
+            "Microsoft.PowerToys",
+            "PowerToys",
+            Some("powertoys"),
+            &query,
+            SearchSemantics::Many,
+            |_| Ok(Some("powertoys".to_string())),
+            |_| Ok(None),
+        )
+        .expect("match criteria");
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn search_ranking_demotes_unknown_version_result() {
+        let query = PackageQuery {
+            query: Some("PowerToys".to_string()),
+            ..Default::default()
+        };
+        let unknown_version = SearchMatch {
+            source_name: "msstore".to_string(),
+            source_kind: SourceKind::Rest,
+            id: "XP89DCGQ3K6VLD".to_string(),
+            name: "Microsoft PowerToys".to_string(),
+            moniker: None,
+            version: Some("Unknown".to_string()),
+            channel: None,
+            match_criteria: None,
+        };
+        let tag_match = SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "Riri.QRCodeforCmdPal".to_string(),
+            name: "QR Code for CmdPal".to_string(),
+            moniker: None,
+            version: Some("0.0.1.0".to_string()),
+            channel: None,
+            match_criteria: Some("Tag: powertoys".to_string()),
+        };
+
+        assert!(
+            search_match_sort_score(&tag_match, &query)
+                > search_match_sort_score(&unknown_version, &query)
+        );
+    }
+
+    #[test]
+    fn search_source_fetch_results_ignore_small_display_count() {
+        let query = PackageQuery {
+            count: Some(5),
+            ..Default::default()
+        };
+
+        assert_eq!(source_fetch_results(&query, SearchSemantics::Many), 50);
+        assert_eq!(source_fetch_results(&query, SearchSemantics::Single), 5);
+    }
+
+    #[test]
+    fn search_ranking_prefers_exact_tag_over_plain_name_prefix() {
+        let query = PackageQuery {
+            query: Some("PowerToys".to_string()),
+            ..Default::default()
+        };
+        let prefix_name = SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "advaith.CurrencyConverterPowerToys".to_string(),
+            name: "PowerToys-Run-Currency-Converter".to_string(),
+            moniker: None,
+            version: Some("1.5.4".to_string()),
+            channel: None,
+            match_criteria: None,
+        };
+        let exact_tag = SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "Riri.QRCodeforCmdPal".to_string(),
+            name: "QR Code for CmdPal".to_string(),
+            moniker: None,
+            version: Some("0.0.1.0".to_string()),
+            channel: None,
+            match_criteria: Some("Tag: powertoys".to_string()),
+        };
+
+        assert!(
+            search_match_sort_score(&exact_tag, &query)
+                > search_match_sort_score(&prefix_name, &query)
+        );
+    }
+
+    #[test]
+    fn list_sort_prefers_main_package_then_sparse_app() {
+        let main = InstalledPackage {
+            name: "PowerToys (Preview) x64".to_string(),
+            local_id: r"ARP\User\X64\PowerToys".to_string(),
+            installed_version: "0.98.1".to_string(),
+            publisher: None,
+            scope: Some("User".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+        let sparse = InstalledPackage {
+            name: "PowerToys.SparseApp".to_string(),
+            local_id: r"MSIX\Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe"
+                .to_string(),
+            installed_version: "0.98.1.0".to_string(),
+            publisher: None,
+            scope: Some("User".to_string()),
+            installer_category: Some("msix".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+        let extension = InstalledPackage {
+            name: "PowerToys FileLocksmith Context Menu".to_string(),
+            local_id:
+                r"MSIX\Microsoft.PowerToys.FileLocksmithContextMenu_0.98.1.0_neutral__8wekyb3d8bbwe"
+                    .to_string(),
+            installed_version: "0.98.1.0".to_string(),
+            publisher: None,
+            scope: Some("User".to_string()),
+            installer_category: Some("msix".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        };
+
+        assert!(list_sort_weight(&main) < list_sort_weight(&sparse));
+        assert!(list_sort_weight(&sparse) < list_sort_weight(&extension));
     }
 }
