@@ -51,7 +51,12 @@ struct ShowArgs {
 struct QueryArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    #[arg(
+        long = "query",
+        short = 'q',
+        value_name = "QUERY",
+        conflicts_with = "query"
+    )]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -81,7 +86,12 @@ struct QueryArgs {
 struct SearchArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    #[arg(
+        long = "query",
+        short = 'q',
+        value_name = "QUERY",
+        conflicts_with = "query"
+    )]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -107,7 +117,12 @@ struct SearchArgs {
 struct ListArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
+    #[arg(
+        long = "query",
+        short = 'q',
+        value_name = "QUERY",
+        conflicts_with = "query"
+    )]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,

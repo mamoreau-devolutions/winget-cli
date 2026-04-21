@@ -564,6 +564,10 @@ impl Repository {
         }
 
         if semantics == SearchSemantics::Many {
+            matches.sort_by(|left, right| {
+                search_match_sort_score(&right.display, query)
+                    .cmp(&search_match_sort_score(&left.display, query))
+            });
             let limit = max_results(query);
             if matches.len() > limit {
                 truncated = true;
@@ -1431,6 +1435,13 @@ fn collect_installed_packages(scope: Option<&str>) -> Result<Vec<InstalledPackag
             "X86",
             KEY_READ | KEY_WOW64_32KEY,
         )?;
+        collect_appmodel_packages(
+            &mut packages,
+            &mut seen,
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            "Machine",
+            KEY_READ | KEY_WOW64_64KEY,
+        )?;
     }
 
     if user {
@@ -1440,6 +1451,13 @@ fn collect_installed_packages(scope: Option<&str>) -> Result<Vec<InstalledPackag
             RegKey::predef(HKEY_CURRENT_USER),
             "User",
             "X64",
+            KEY_READ,
+        )?;
+        collect_appmodel_packages(
+            &mut packages,
+            &mut seen,
+            RegKey::predef(HKEY_CURRENT_USER),
+            "User",
             KEY_READ,
         )?;
     }
@@ -1538,6 +1556,114 @@ fn collect_uninstall_view(
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn collect_appmodel_packages(
+    packages: &mut Vec<InstalledPackage>,
+    seen: &mut BTreeSet<String>,
+    root: RegKey,
+    scope: &str,
+    flags: u32,
+) -> Result<()> {
+    const APPMODEL_PACKAGES_PATH: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+
+    let appmodel = match root.open_subkey_with_flags(APPMODEL_PACKAGES_PATH, flags) {
+        Ok(key) => key,
+        Err(_) => return Ok(()),
+    };
+
+    for key_name in appmodel.enum_keys().flatten() {
+        let subkey = match appmodel.open_subkey_with_flags(&key_name, flags) {
+            Ok(key) => key,
+            Err(_) => continue,
+        };
+
+        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let install_location = read_reg_string(&subkey, "PackageRootFolder");
+        if install_location
+            .as_deref()
+            .is_some_and(is_windows_system_path)
+        {
+            continue;
+        }
+
+        let Some(metadata) = parse_msix_package_full_name(&key_name) else {
+            continue;
+        };
+
+        let local_id = format!(r"MSIX\{scope}\{key_name}");
+        let dedupe_key = format!(
+            "{}|{}|{}",
+            local_id,
+            name.to_ascii_lowercase(),
+            metadata.version.to_ascii_lowercase()
+        );
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+
+        packages.push(InstalledPackage {
+            name,
+            local_id,
+            installed_version: metadata.version,
+            publisher: None,
+            scope: Some(scope.to_string()),
+            installer_category: Some("msix".to_string()),
+            install_location,
+            package_family_names: vec![metadata.family_name],
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+            correlated: None,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+struct ParsedMsixPackageFullName {
+    version: String,
+    family_name: String,
+}
+
+#[cfg(windows)]
+fn parse_msix_package_full_name(value: &str) -> Option<ParsedMsixPackageFullName> {
+    let segments = value.split('_').collect::<Vec<_>>();
+    if segments.len() < 5 {
+        return None;
+    }
+
+    let name = segments[..segments.len() - 4].join("_");
+    if name.is_empty() {
+        return None;
+    }
+
+    let version = segments[segments.len() - 4].trim();
+    let resource_id = segments[segments.len() - 2].trim();
+    let publisher_id = segments[segments.len() - 1].trim();
+    if version.is_empty() || publisher_id.is_empty() {
+        return None;
+    }
+
+    let family_name = if resource_id.is_empty() {
+        format!("{name}_{publisher_id}")
+    } else {
+        format!("{name}_{resource_id}_{publisher_id}")
+    };
+
+    Some(ParsedMsixPackageFullName {
+        version: version.to_string(),
+        family_name,
+    })
+}
+
+#[cfg(windows)]
+fn is_windows_system_path(path: &str) -> bool {
+    path.trim().to_ascii_lowercase().starts_with(r"c:\windows\")
 }
 
 #[cfg(windows)]
@@ -2366,6 +2492,136 @@ fn matches_text(candidate: &str, query: &str, exact: bool) -> bool {
             .to_ascii_lowercase()
             .contains(&query.to_ascii_lowercase())
     }
+}
+
+fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usize {
+    let mut score = 0;
+
+    if let Some(value) = &query.query {
+        score = score.max(score_text_match(
+            &candidate.name,
+            value,
+            query.exact,
+            140,
+            120,
+            100,
+        ));
+        score = score.max(score_text_match(
+            &candidate.id,
+            value,
+            query.exact,
+            135,
+            115,
+            95,
+        ));
+        if let Some(moniker) = candidate.moniker.as_deref() {
+            score = score.max(score_text_match(moniker, value, query.exact, 130, 110, 90));
+        }
+        if let Some((field, matched_value)) = candidate
+            .match_criteria
+            .as_deref()
+            .and_then(parse_match_criteria)
+        {
+            let field_score = match field {
+                "Tag" => score_text_match(matched_value, value, query.exact, 60, 50, 40),
+                "Command" => score_text_match(matched_value, value, query.exact, 55, 45, 35),
+                "Moniker" => score_text_match(matched_value, value, query.exact, 125, 105, 85),
+                _ => 0,
+            };
+            score = score.max(field_score);
+        }
+    }
+
+    if let Some(value) = &query.id {
+        score = score.max(score_text_match(
+            &candidate.id,
+            value,
+            query.exact,
+            220,
+            200,
+            180,
+        ));
+    }
+    if let Some(value) = &query.name {
+        score = score.max(score_text_match(
+            &candidate.name,
+            value,
+            query.exact,
+            210,
+            190,
+            170,
+        ));
+    }
+    if let Some(value) = &query.moniker {
+        if let Some(moniker) = candidate.moniker.as_deref() {
+            score = score.max(score_text_match(moniker, value, query.exact, 205, 185, 165));
+        }
+    }
+    if let Some(value) = &query.tag {
+        if let Some(("Tag", matched_value)) = candidate
+            .match_criteria
+            .as_deref()
+            .and_then(parse_match_criteria)
+        {
+            score = score.max(score_text_match(
+                matched_value,
+                value,
+                query.exact,
+                160,
+                150,
+                140,
+            ));
+        }
+    }
+    if let Some(value) = &query.command {
+        if let Some(("Command", matched_value)) = candidate
+            .match_criteria
+            .as_deref()
+            .and_then(parse_match_criteria)
+        {
+            score = score.max(score_text_match(
+                matched_value,
+                value,
+                query.exact,
+                155,
+                145,
+                135,
+            ));
+        }
+    }
+
+    score
+}
+
+fn score_text_match(
+    candidate: &str,
+    query: &str,
+    exact: bool,
+    exact_score: usize,
+    prefix_score: usize,
+    substring_score: usize,
+) -> usize {
+    if candidate.eq_ignore_ascii_case(query) {
+        return exact_score;
+    }
+    if exact {
+        return 0;
+    }
+
+    let candidate_lower = candidate.to_ascii_lowercase();
+    let query_lower = query.to_ascii_lowercase();
+    if candidate_lower.starts_with(&query_lower) {
+        prefix_score
+    } else if candidate_lower.contains(&query_lower) {
+        substring_score
+    } else {
+        0
+    }
+}
+
+fn parse_match_criteria(criteria: &str) -> Option<(&str, &str)> {
+    let (field, value) = criteria.split_once(": ")?;
+    Some((field, value))
 }
 
 fn parse_rest_versions(item: &JsonValue) -> Result<Vec<VersionKey>> {
@@ -3431,6 +3687,61 @@ mod tests {
                 .available_version
                 .as_deref(),
             Some("2.0.0")
+        );
+    }
+
+    #[test]
+    fn parses_msix_package_full_name_into_version_and_family() {
+        let parsed = parse_msix_package_full_name(
+            "Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe",
+        )
+        .expect("package metadata");
+
+        assert_eq!(parsed.version, "0.98.1.0");
+        assert_eq!(
+            parsed.family_name,
+            "Microsoft.PowerToys.SparseApp_8wekyb3d8bbwe"
+        );
+    }
+
+    #[test]
+    fn recognizes_windows_system_paths() {
+        assert!(is_windows_system_path(r"C:\Windows\SystemApps\Contoso"));
+        assert!(!is_windows_system_path(
+            r"C:\Users\mamoreau\AppData\Local\PowerToys\WinUI3Apps"
+        ));
+    }
+
+    #[test]
+    fn search_ranking_prefers_exact_name_over_tag_match() {
+        let query = PackageQuery {
+            query: Some("PowerToys".to_string()),
+            ..Default::default()
+        };
+        let exact_name = SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "Microsoft.PowerToys".to_string(),
+            name: "PowerToys".to_string(),
+            moniker: Some("powertoys".to_string()),
+            version: Some("0.98.1".to_string()),
+            channel: None,
+            match_criteria: Some("Moniker: powertoys".to_string()),
+        };
+        let tag_match = SearchMatch {
+            source_name: "winget".to_string(),
+            source_kind: SourceKind::PreIndexed,
+            id: "JiriPolasek.QRCodesforCommandPalette".to_string(),
+            name: "QR Codes for Command Palette".to_string(),
+            moniker: None,
+            version: Some("0.4.0.0".to_string()),
+            channel: None,
+            match_criteria: Some("Tag: microsoft-powertoys".to_string()),
+        };
+
+        assert!(
+            search_match_sort_score(&exact_name, &query)
+                > search_match_sort_score(&tag_match, &query)
         );
     }
 }
