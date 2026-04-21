@@ -5,11 +5,15 @@ use winget_core::{
     SearchResponse, ShowResult, SourceRecord, SourceUpdateResult, VersionsResult,
 };
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
-#[command(name = "winget", about = "Pure Rust subset of the winget CLI")]
+#[command(name = "winget", about = "Pure Rust subset of the winget CLI", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+    #[arg(long = "info", global = true)]
+    info: bool,
 }
 
 #[derive(Subcommand)]
@@ -18,6 +22,8 @@ enum Commands {
     List(ListArgs),
     Show(ShowArgs),
     Search(SearchArgs),
+    #[command(alias = "update")]
+    Upgrade(UpgradeArgs),
     Source {
         #[command(subcommand)]
         command: SourceCommands,
@@ -26,12 +32,27 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+    Hash(HashArgs),
+    Export(ExportArgs),
+    #[command(name = "error")]
+    ErrorLookup(ErrorArgs),
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommands,
+    },
+    Features,
 }
 
 #[derive(Subcommand)]
 enum SourceCommands {
     List,
     Update { source: Option<String> },
+    Export,
+}
+
+#[derive(Subcommand)]
+enum SettingsCommands {
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -45,6 +66,57 @@ struct ShowArgs {
     query: QueryArgs,
     #[arg(long = "versions")]
     versions: bool,
+}
+
+#[derive(Args)]
+struct UpgradeArgs {
+    #[arg(conflicts_with = "query_option")]
+    query: Option<String>,
+    #[arg(
+        long = "query",
+        short = 'q',
+        value_name = "QUERY",
+        conflicts_with = "query"
+    )]
+    query_option: Option<String>,
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    moniker: Option<String>,
+    #[arg(long, short = 's')]
+    source: Option<String>,
+    #[arg(long, short = 'n')]
+    count: Option<usize>,
+    #[arg(long, short = 'e')]
+    exact: bool,
+    #[arg(long = "include-unknown", short = 'u', visible_alias = "unknown")]
+    include_unknown: bool,
+    #[arg(long = "include-pinned", visible_alias = "pinned")]
+    include_pinned: bool,
+}
+
+#[derive(Args)]
+struct HashArgs {
+    file: String,
+    #[arg(long)]
+    msix: bool,
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    #[arg(long, short = 'o')]
+    output: String,
+    #[arg(long, short = 's')]
+    source: Option<String>,
+    #[arg(long = "include-versions")]
+    include_versions: bool,
+}
+
+#[derive(Args)]
+struct ErrorArgs {
+    input: String,
 }
 
 #[derive(Args, Clone)]
@@ -161,10 +233,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let mut repository = Repository::open()?;
 
-    match cli.command {
+    if cli.info {
+        print_info();
+        return Ok(());
+    }
+
+    let command = match cli.command {
+        Some(command) => command,
+        None => {
+            Cli::parse_from(["winget", "--help"]);
+            return Ok(());
+        }
+    };
+
+    match command {
         Commands::List(args) => {
+            let mut repository = Repository::open()?;
             print_list_result(
                 repository.list(&args.clone().into())?,
                 args.details,
@@ -172,6 +257,7 @@ fn run() -> Result<()> {
             );
         }
         Commands::Show(args) => {
+            let mut repository = Repository::open()?;
             if args.versions {
                 print_versions(repository.show_versions(&args.query.into())?);
             } else {
@@ -179,21 +265,51 @@ fn run() -> Result<()> {
             }
         }
         Commands::Search(args) => {
+            let mut repository = Repository::open()?;
             if args.versions {
                 print_versions(repository.search_versions(&args.clone().into())?);
             } else {
                 print_search(repository.search(&args.into())?);
             }
         }
-        Commands::Source { command } => match command {
-            SourceCommands::List => print_sources(repository.list_sources()),
-            SourceCommands::Update { source } => {
-                print_source_updates(repository.update_sources(source.as_deref())?)
+        Commands::Upgrade(args) => {
+            let mut repository = Repository::open()?;
+            let list_query = ListQuery::from(args);
+            print_list_result(repository.list(&list_query)?, false, true);
+        }
+        Commands::Source { command } => {
+            let repository = Repository::open()?;
+            match command {
+                SourceCommands::List => print_sources(repository.list_sources()),
+                SourceCommands::Update { source } => {
+                    let mut repository = repository;
+                    print_source_updates(repository.update_sources(source.as_deref())?)
+                }
+                SourceCommands::Export => print_source_export(&repository),
             }
+        }
+        Commands::Cache { command } => {
+            let mut repository = Repository::open()?;
+            match command {
+                CacheCommands::Warm(args) => print_cache_warm(repository.warm_cache(&args.into())?),
+            }
+        }
+        Commands::Hash(args) => {
+            print_hash(&args.file, args.msix)?;
+        }
+        Commands::Export(args) => {
+            let mut repository = Repository::open()?;
+            do_export(&mut repository, &args)?;
+        }
+        Commands::ErrorLookup(args) => {
+            print_error_lookup(&args.input);
+        }
+        Commands::Settings { command } => match command {
+            SettingsCommands::Export => print_settings_export(),
         },
-        Commands::Cache { command } => match command {
-            CacheCommands::Warm(args) => print_cache_warm(repository.warm_cache(&args.into())?),
-        },
+        Commands::Features => {
+            print_features();
+        }
     }
 
     Ok(())
@@ -257,6 +373,26 @@ impl From<ListArgs> for ListQuery {
             exact: value.exact,
             install_scope: value.install_scope,
             upgrade_only: value.upgrade,
+            include_unknown: value.include_unknown,
+            include_pinned: value.include_pinned,
+        }
+    }
+}
+
+impl From<UpgradeArgs> for ListQuery {
+    fn from(value: UpgradeArgs) -> Self {
+        Self {
+            query: value.query.or(value.query_option),
+            id: value.id,
+            name: value.name,
+            moniker: value.moniker,
+            tag: None,
+            command: None,
+            source: value.source,
+            count: value.count,
+            exact: value.exact,
+            install_scope: None,
+            upgrade_only: true,
             include_unknown: value.include_unknown,
             include_pinned: value.include_pinned,
         }
@@ -335,7 +471,7 @@ fn print_list_result(result: ListResponse, details: bool, upgrade_only: bool) {
 
     print_warnings(&warnings);
     if matches.is_empty() {
-        println!("No installed package found.");
+        println!("No installed package found matching input criteria.");
         return;
     }
 
@@ -601,6 +737,438 @@ fn print_documentation(entries: &[Documentation]) {
             _ => println!("  {}", entry.url),
         }
     }
+}
+
+fn print_info() {
+    println!("winget-rs v{VERSION}");
+    println!("Pure Rust subset of the Windows Package Manager CLI");
+    println!();
+
+    #[cfg(windows)]
+    {
+        use std::env;
+        let os_version = get_os_version();
+        let arch = env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| "Unknown".to_string());
+        println!("Windows: Windows.Desktop v{os_version}");
+        println!("System Architecture: {arch}");
+        println!();
+
+        println!("WinGet Directories");
+        println!("{}", "-".repeat(80));
+        let local_app_data = env::var("LOCALAPPDATA").unwrap_or_default();
+        let user_profile = env::var("USERPROFILE").unwrap_or_default();
+        let source_cache = format!(
+            "{}\\Packages\\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\\LocalState\\Microsoft\\Windows Package Manager",
+            local_app_data
+        );
+        let settings_path = format!(
+            "{}\\Packages\\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\\LocalState\\settings.json",
+            local_app_data
+        );
+        let portable_links_user = format!("{}\\Microsoft\\WinGet\\Links", local_app_data);
+        let downloads = format!("{}\\Downloads", user_profile);
+
+        println!("{:<40} {}", "Source Cache", source_cache);
+        println!("{:<40} {}", "User Settings", settings_path);
+        println!(
+            "{:<40} {}",
+            "Portable Links Directory (User)", portable_links_user
+        );
+        println!(
+            "{:<40} {}",
+            "Portable Links Directory (Machine)", "C:\\Program Files\\WinGet\\Links"
+        );
+        println!(
+            "{:<40} {}",
+            "Portable Package Root (User)",
+            format!("{}\\Microsoft\\WinGet\\Packages", local_app_data)
+        );
+        println!(
+            "{:<40} {}",
+            "Portable Package Root", "C:\\Program Files\\WinGet\\Packages"
+        );
+        println!(
+            "{:<40} {}",
+            "Portable Package Root (x86)", "C:\\Program Files (x86)\\WinGet\\Packages"
+        );
+        println!("{:<40} {}", "Installer Downloads", downloads);
+    }
+    #[cfg(not(windows))]
+    {
+        println!("Platform: {}", std::env::consts::OS);
+        println!("Architecture: {}", std::env::consts::ARCH);
+    }
+
+    println!();
+    println!("Links");
+    println!("{}", "-".repeat(80));
+    println!("{:<20} {}", "Homepage", "https://aka.ms/winget");
+    println!(
+        "{:<20} {}",
+        "Privacy Statement", "https://aka.ms/winget-privacy"
+    );
+    println!(
+        "{:<20} {}",
+        "License Agreement", "https://aka.ms/winget-license"
+    );
+}
+
+#[cfg(windows)]
+fn get_os_version() -> String {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    if let Ok(key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+        let build: String = key.get_value("CurrentBuildNumber").unwrap_or_default();
+        let ubr: u32 = key.get_value("UBR").unwrap_or(0);
+        let major: u32 = key.get_value("CurrentMajorVersionNumber").unwrap_or(10);
+        let minor: u32 = key.get_value("CurrentMinorVersionNumber").unwrap_or(0);
+        format!("{major}.{minor}.{build}.{ubr}")
+    } else {
+        "Unknown".to_string()
+    }
+}
+
+fn print_hash(file_path: &str, _msix: bool) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    let data = fs::read(file_path)
+        .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", file_path, e))?;
+    let hash = Sha256::digest(&data);
+    let hex = hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!("SHA256: {hex}");
+    Ok(())
+}
+
+fn do_export(repository: &mut Repository, args: &ExportArgs) -> Result<()> {
+    let list_query = ListQuery {
+        query: None,
+        id: None,
+        name: None,
+        moniker: None,
+        tag: None,
+        command: None,
+        source: args.source.clone(),
+        count: None,
+        exact: false,
+        install_scope: None,
+        upgrade_only: false,
+        include_unknown: false,
+        include_pinned: false,
+    };
+    let result = repository.list(&list_query)?;
+
+    let packages: Vec<serde_json::Value> = result
+        .matches
+        .iter()
+        .filter(|m| m.source_name.is_some())
+        .map(|m| {
+            let mut obj = serde_json::json!({
+                "PackageIdentifier": m.id,
+            });
+            if args.include_versions {
+                obj["Version"] = serde_json::Value::String(m.installed_version.clone());
+            }
+            if let Some(source) = &m.source_name {
+                obj["SourceDetails"] = serde_json::json!({
+                    "Name": source,
+                    "Type": "Microsoft.PreIndexed.Package",
+                    "Argument": ""
+                });
+            }
+            obj
+        })
+        .collect();
+
+    let export = serde_json::json!({
+        "$schema": "https://aka.ms/winget-packages.schema.2.0.json",
+        "CreationDate": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+        "Sources": [{
+            "SourceDetails": {
+                "Name": "winget",
+                "Type": "Microsoft.PreIndexed.Package",
+                "Argument": "https://cdn.winget.microsoft.com/cache"
+            },
+            "Packages": packages
+        }],
+        "WinGetVersion": VERSION,
+    });
+
+    let json = serde_json::to_string_pretty(&export)?;
+    std::fs::write(&args.output, &json)
+        .map_err(|e| anyhow::anyhow!("failed to write export file '{}': {}", args.output, e))?;
+    println!("Exported {} packages to {}", packages.len(), args.output);
+    Ok(())
+}
+
+fn print_error_lookup(input: &str) {
+    let code = if input.starts_with("0x") || input.starts_with("0X") {
+        u32::from_str_radix(&input[2..], 16).ok()
+    } else {
+        input
+            .parse::<u32>()
+            .ok()
+            .or_else(|| input.parse::<i32>().ok().map(|v| v as u32))
+    };
+
+    let code = match code {
+        Some(c) => c,
+        None => {
+            println!("Could not parse input '{input}' as an error code.");
+            return;
+        }
+    };
+
+    println!("Error code: 0x{code:08X} ({code})");
+    if let Some(description) = lookup_hresult(code) {
+        println!("Description: {description}");
+    } else {
+        println!("No known description for this error code.");
+    }
+}
+
+fn lookup_hresult(code: u32) -> Option<&'static str> {
+    match code {
+        0x00000000 => Some("S_OK - Operation successful"),
+        0x80004001 => Some("E_NOTIMPL - Not implemented"),
+        0x80004002 => Some("E_NOINTERFACE - No such interface supported"),
+        0x80004003 => Some("E_POINTER - Invalid pointer"),
+        0x80004004 => Some("E_ABORT - Operation aborted"),
+        0x80004005 => Some("E_FAIL - Unspecified failure"),
+        0x80070002 => Some("E_FILENOTFOUND - The system cannot find the file specified"),
+        0x80070005 => Some("E_ACCESSDENIED - General access denied error"),
+        0x80070057 => Some("E_INVALIDARG - One or more arguments are invalid"),
+        0x8007000E => Some("E_OUTOFMEMORY - Ran out of memory"),
+        // winget-specific HRESULT codes
+        0x8A150001 => Some("APPINSTALLER_CLI_ERROR_INTERNAL_ERROR - Internal error"),
+        0x8A150002 => {
+            Some("APPINSTALLER_CLI_ERROR_INVALID_CL_ARGUMENTS - Invalid command line arguments")
+        }
+        0x8A150003 => Some("APPINSTALLER_CLI_ERROR_COMMAND_FAILED - Command failed"),
+        0x8A150004 => Some("APPINSTALLER_CLI_ERROR_MANIFEST_FAILED - Opening manifest failed"),
+        0x8A150005 => {
+            Some("APPINSTALLER_CLI_ERROR_BLOCKED_BY_POLICY - Operation is blocked by policy")
+        }
+        0x8A150006 => {
+            Some("APPINSTALLER_CLI_ERROR_SHELLEXEC_INSTALL_FAILED - ShellExecute install failed")
+        }
+        0x8A150007 => Some(
+            "APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION - Unsupported manifest version",
+        ),
+        0x8A150008 => Some("APPINSTALLER_CLI_ERROR_DOWNLOAD_FAILED - Download of installer failed"),
+        0x8A150009 => Some(
+            "APPINSTALLER_CLI_ERROR_CANNOT_WRITE_TO_UPLEVEL_INDEX - Cannot write to the package index",
+        ),
+        0x8A15000A => {
+            Some("APPINSTALLER_CLI_ERROR_INDEX_INTEGRITY_COMPROMISED - Index integrity compromised")
+        }
+        0x8A15000B => Some("APPINSTALLER_CLI_ERROR_SOURCES_INVALID - Sources are invalid"),
+        0x8A15000C => {
+            Some("APPINSTALLER_CLI_ERROR_SOURCE_NAME_ALREADY_EXISTS - Source name already exists")
+        }
+        0x8A15000D => Some("APPINSTALLER_CLI_ERROR_INVALID_SOURCE_TYPE - Invalid source type"),
+        0x8A15000E => Some("APPINSTALLER_CLI_ERROR_PACKAGE_IS_BUNDLE - Package is a bundle"),
+        0x8A15000F => Some("APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING - Source data is missing"),
+        0x8A150010 => {
+            Some("APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER - No applicable installer found")
+        }
+        0x8A150011 => {
+            Some("APPINSTALLER_CLI_ERROR_INSTALLER_HASH_MISMATCH - Installer hash does not match")
+        }
+        0x8A150012 => {
+            Some("APPINSTALLER_CLI_ERROR_SOURCE_NAME_DOES_NOT_EXIST - Source name does not exist")
+        }
+        0x8A150013 => Some(
+            "APPINSTALLER_CLI_ERROR_SOURCE_ARG_ALREADY_EXISTS - Source argument already exists",
+        ),
+        0x8A150014 => Some("APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND - No applications found"),
+        0x8A150015 => Some("APPINSTALLER_CLI_ERROR_NO_SOURCES_DEFINED - No sources defined"),
+        0x8A150016 => {
+            Some("APPINSTALLER_CLI_ERROR_MULTIPLE_APPLICATIONS_FOUND - Multiple applications found")
+        }
+        0x8A150017 => Some(
+            "APPINSTALLER_CLI_ERROR_NO_MANIFEST_FOUND - No manifest found matching input criteria",
+        ),
+        0x8A150019 => Some("APPINSTALLER_CLI_ERROR_NO_RANGES_PROCESSED - No ranges processed"),
+        0x8A15001A => Some(
+            "APPINSTALLER_CLI_ERROR_EXPERIMENTAL_FEATURE_DISABLED - This feature is disabled by Group Policy",
+        ),
+        0x8A15001B => Some(
+            "APPINSTALLER_CLI_ERROR_MSSTORE_BLOCKED_BY_POLICY - This feature is blocked by Group Policy",
+        ),
+        0x8A15001C => Some(
+            "APPINSTALLER_CLI_ERROR_MSSTORE_APP_BLOCKED_BY_POLICY - This Microsoft Store app is blocked by Group Policy",
+        ),
+        0x8A150022 => Some(
+            "APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE - Upgrade version is not newer than installed version",
+        ),
+        0x8A150023 => Some(
+            "APPINSTALLER_CLI_ERROR_UPDATE_ALL_HAS_FAILURE - At least one package had a failure during upgrade --all",
+        ),
+        0x8A150024 => Some(
+            "APPINSTALLER_CLI_ERROR_INSTALLER_SECURITY_CHECK_FAILED - Installer failed security check",
+        ),
+        0x8A15002B => Some(
+            "APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED - The package is already installed",
+        ),
+        0x8A150038 => Some(
+            "APPINSTALLER_CLI_ERROR_PINNED_CERTIFICATE_MISMATCH - Certificate pinning mismatch",
+        ),
+        _ => None,
+    }
+}
+
+fn print_settings_export() {
+    #[cfg(windows)]
+    {
+        use std::env;
+        let local_app_data = env::var("LOCALAPPDATA").unwrap_or_default();
+        let settings_path = format!(
+            "{}\\Packages\\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\\LocalState\\settings.json",
+            local_app_data
+        );
+
+        // Read admin settings from registry
+        let mut admin_settings = serde_json::Map::new();
+        {
+            use winreg::RegKey;
+            use winreg::enums::HKEY_LOCAL_MACHINE;
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            if let Ok(key) =
+                hklm.open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppInstaller")
+            {
+                let setting_names = [
+                    "LocalManifestFiles",
+                    "BypassCertificatePinningForMicrosoftStore",
+                    "InstallerHashOverride",
+                    "LocalArchiveMalwareScanOverride",
+                    "ProxyCommandLineOptions",
+                    "DefaultProxy",
+                ];
+                for name in setting_names {
+                    let enabled: bool = key.get_value::<u32, _>(name).unwrap_or(0) != 0;
+                    admin_settings.insert(name.to_string(), serde_json::Value::Bool(enabled));
+                }
+            }
+        }
+
+        let export = serde_json::json!({
+            "$schema": "https://aka.ms/winget-settings-export.schema.json",
+            "adminSettings": admin_settings,
+            "userSettingsFile": settings_path,
+        });
+
+        println!("{}", serde_json::to_string_pretty(&export).unwrap());
+    }
+    #[cfg(not(windows))]
+    {
+        println!("{{}}");
+    }
+}
+
+fn print_features() {
+    println!("The following experimental features are in progress.");
+    println!("They can be configured through the settings file 'winget settings'.");
+    println!();
+
+    #[cfg(windows)]
+    {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+
+        let features = [
+            (
+                "Configuration (configure)",
+                "configuration",
+                "https://aka.ms/winget-settings",
+            ),
+            ("Direct MSI", "directMSI", "https://aka.ms/winget-settings"),
+            (
+                "Windows Feature Dependencies",
+                "windowsFeature",
+                "https://aka.ms/winget-settings",
+            ),
+            ("Resume", "resume", "https://aka.ms/winget-settings"),
+            ("Repair", "repair", "https://aka.ms/winget-settings"),
+            (
+                "Side-by-side installation",
+                "sideBySide",
+                "https://aka.ms/winget-settings",
+            ),
+            ("Pinning", "pinning", "https://aka.ms/winget-settings"),
+        ];
+
+        // Try reading user settings to see which features are enabled
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let settings_path = format!(
+            "{}\\Packages\\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\\LocalState\\settings.json",
+            local_app_data
+        );
+        let user_settings: serde_json::Value = std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        let experimental_features = user_settings
+            .get("experimentalFeatures")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        // Check group policy
+        let gp_disabled: bool = {
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            hklm.open_subkey("SOFTWARE\\Policies\\Microsoft\\Windows\\AppInstaller")
+                .and_then(|key| key.get_value::<u32, _>("EnableExperimentalFeatures"))
+                .map(|v| v == 0)
+                .unwrap_or(false)
+        };
+
+        println!(
+            "{:<40} {:<10} {:<30} {}",
+            "Feature", "Status", "Property", "Link"
+        );
+        println!("{}", "-".repeat(100));
+        for (display_name, property, link) in features {
+            let enabled = if gp_disabled {
+                false
+            } else {
+                experimental_features
+                    .get(property)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            };
+            let status = if enabled { "Enabled" } else { "Disabled" };
+            println!("{display_name:<40} {status:<10} {property:<30} {link}");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        println!("Feature listing is only available on Windows.");
+    }
+}
+
+fn print_source_export(repository: &Repository) {
+    let sources = repository.list_sources();
+    let source_array: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "Name": s.name,
+                "Type": s.kind.to_string(),
+                "Arg": s.arg,
+                "Data": s.identifier,
+                "Identifier": s.identifier,
+                "TrustLevel": "Default"
+            })
+        })
+        .collect();
+    let export = serde_json::json!({
+        "Sources": source_array,
+    });
+    println!("{}", serde_json::to_string_pretty(&export).unwrap());
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {

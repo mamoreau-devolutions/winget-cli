@@ -399,36 +399,30 @@ impl Repository {
         {
             bail!("list --source currently requires a query or explicit filter");
         }
-        if query.upgrade_only && !list_query_needs_available_lookup(query) {
-            bail!("unfiltered --upgrade-available is not implemented yet");
-        }
+
+        let has_filter = list_query_needs_available_lookup(query);
+        let needs_available = has_filter || query.upgrade_only;
 
         let mut warnings = Vec::new();
         let mut installed = collect_installed_packages(query.install_scope.as_deref())?;
 
-        let available_candidates = if list_query_needs_available_lookup(query) {
+        if needs_available && has_filter {
+            // Filtered lookup: search sources with the user's query
             let available_query = package_query_from_list_query(query);
             let (matches, source_warnings, _) =
                 self.search_located(&available_query, SearchSemantics::Many)?;
             warnings.extend(source_warnings);
-            Some(
-                matches
-                    .into_iter()
-                    .map(|candidate| candidate.display)
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-
-        for package in &mut installed {
-            if let Some(candidates) = available_candidates.as_deref() {
+            let candidates: Vec<SearchMatch> = matches.into_iter().map(|c| c.display).collect();
+            for package in &mut installed {
                 package.correlated = correlate_installed_package(
                     package,
-                    candidates,
+                    &candidates,
                     allow_loose_list_correlation(query),
                 );
             }
+        } else if needs_available {
+            // Unfiltered upgrade: look up each installed package by its correlation names
+            warnings.extend(self.correlate_all_installed(&mut installed)?);
         }
 
         let mut matches = installed
@@ -464,6 +458,39 @@ impl Repository {
             warnings,
             truncated,
         })
+    }
+
+    /// For unfiltered upgrade/list, search the entire available index and correlate
+    /// against all installed packages.
+    fn correlate_all_installed(
+        &mut self,
+        installed: &mut [InstalledPackage],
+    ) -> Result<Vec<String>> {
+        let all_query = PackageQuery {
+            query: None,
+            id: None,
+            name: None,
+            moniker: None,
+            tag: None,
+            command: None,
+            source: None,
+            count: Some(100_000), // fetch the entire index
+            exact: false,
+            version: None,
+            channel: None,
+            locale: None,
+            installer_type: None,
+            installer_architecture: None,
+            install_scope: None,
+        };
+        let (matches, warnings, _) = self.search_located(&all_query, SearchSemantics::Many)?;
+        let candidates: Vec<SearchMatch> = matches.into_iter().map(|c| c.display).collect();
+
+        for package in installed.iter_mut() {
+            package.correlated = correlate_installed_package(package, &candidates, true);
+        }
+
+        Ok(warnings)
     }
 
     pub fn search_versions(&mut self, query: &PackageQuery) -> Result<VersionsResult> {

@@ -22,8 +22,13 @@ $defaultCases = @(
         Args = @("list", "Microsoft.PowerToys")
     },
     @{
-        Name = "list-azcopy-upgrade"
-        Args = @("list", "Microsoft.Azure.AZCopy.10", "--upgrade-available")
+        Name = "list-lazygit-upgrade"
+        Args = @("list", "JesseDuffield.lazygit", "--upgrade-available")
+    },
+    @{
+        Name = "upgrade-lazygit"
+        Args = @("list", "JesseDuffield.lazygit", "--upgrade-available")
+        RustArgs = @("upgrade", "JesseDuffield.lazygit")
     }
 )
 
@@ -145,7 +150,8 @@ function Write-CaseReport {
 
 $caseSet = Select-CaseSet -RequestedCases $Cases
 foreach ($case in $caseSet) {
-    $rustResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $case.Args
+    $rustArgs = if ($case.ContainsKey('RustArgs')) { $case.RustArgs } else { $case.Args }
+    $rustResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $rustArgs
     $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
     Write-CaseReport -Case $case -RustResult $rustResult -SystemResult $systemResult
 }
