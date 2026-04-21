@@ -121,7 +121,7 @@ pub struct ListQuery {
     pub include_pinned: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchMatch {
     pub source_name: String,
     pub source_kind: SourceKind,
@@ -133,14 +133,14 @@ pub struct SearchMatch {
     pub match_criteria: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResponse {
     pub matches: Vec<SearchMatch>,
     pub warnings: Vec<String>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ListMatch {
     pub name: String,
     pub id: String,
@@ -157,20 +157,20 @@ pub struct ListMatch {
     pub upgrade_codes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ListResponse {
     pub matches: Vec<ListMatch>,
     pub warnings: Vec<String>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VersionKey {
     pub version: String,
     pub channel: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Manifest {
     pub id: String,
     pub name: String,
@@ -196,13 +196,13 @@ pub struct Manifest {
     pub installers: Vec<Installer>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Documentation {
     pub label: Option<String>,
     pub url: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Installer {
     pub architecture: Option<String>,
     pub installer_type: Option<String>,
@@ -218,7 +218,7 @@ pub struct Installer {
     pub package_dependencies: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ShowResult {
     pub package: SearchMatch,
     pub manifest: Manifest,
@@ -227,21 +227,21 @@ pub struct ShowResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VersionsResult {
     pub package: SearchMatch,
     pub versions: Vec<VersionKey>,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CacheWarmResult {
     pub package: SearchMatch,
     pub cached_files: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceUpdateResult {
     pub name: String,
     pub kind: SourceKind,

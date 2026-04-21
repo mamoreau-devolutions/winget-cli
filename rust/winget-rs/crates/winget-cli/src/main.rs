@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use winget_core::{
     CacheWarmResult, Documentation, ListQuery, ListResponse, PackageQuery, Repository,
@@ -14,6 +14,8 @@ struct Cli {
     command: Option<Commands>,
     #[arg(long = "info", global = true)]
     info: bool,
+    #[arg(long = "output", short = 'o', global = true, value_parser = ["json", "text"])]
+    output: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -41,6 +43,13 @@ enum Commands {
         command: SettingsCommands,
     },
     Features,
+    Validate(ValidateArgs),
+    #[command(alias = "dl")]
+    Download(DownloadArgs),
+    Pin {
+        #[command(subcommand)]
+        command: PinCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +126,26 @@ struct ExportArgs {
 #[derive(Args)]
 struct ErrorArgs {
     input: String,
+}
+
+#[derive(Args)]
+struct ValidateArgs {
+    manifest: String,
+    #[arg(long = "ignore-warnings")]
+    ignore_warnings: bool,
+}
+
+#[derive(Args, Clone)]
+struct DownloadArgs {
+    #[command(flatten)]
+    query: QueryArgs,
+    #[arg(short = 'd', long = "download-directory")]
+    download_directory: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum PinCommands {
+    List,
 }
 
 #[derive(Args, Clone)]
@@ -233,6 +262,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let json = cli.output.as_deref() == Some("json");
 
     if cli.info {
         print_info();
@@ -250,32 +280,60 @@ fn run() -> Result<()> {
     match command {
         Commands::List(args) => {
             let mut repository = Repository::open()?;
-            print_list_result(
-                repository.list(&args.clone().into())?,
-                args.details,
-                args.upgrade,
-            );
+            let details = args.details;
+            let upgrade = args.upgrade;
+            let result = repository.list(&args.clone().into())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_list_result(result, details, upgrade);
+            }
         }
         Commands::Show(args) => {
             let mut repository = Repository::open()?;
             if args.versions {
-                print_versions(repository.show_versions(&args.query.into())?);
+                let result = repository.show_versions(&args.query.into())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_versions(result);
+                }
             } else {
-                print_show(repository.show(&args.query.into())?);
+                let result = repository.show(&args.query.into())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_show(result);
+                }
             }
         }
         Commands::Search(args) => {
             let mut repository = Repository::open()?;
             if args.versions {
-                print_versions(repository.search_versions(&args.clone().into())?);
+                let result = repository.search_versions(&args.clone().into())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_versions(result);
+                }
             } else {
-                print_search(repository.search(&args.into())?);
+                let result = repository.search(&args.into())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_search(result);
+                }
             }
         }
         Commands::Upgrade(args) => {
             let mut repository = Repository::open()?;
             let list_query = ListQuery::from(args);
-            print_list_result(repository.list(&list_query)?, false, true);
+            let result = repository.list(&list_query)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_list_result(result, false, true);
+            }
         }
         Commands::Source { command } => {
             let repository = Repository::open()?;
@@ -310,6 +368,19 @@ fn run() -> Result<()> {
         Commands::Features => {
             print_features();
         }
+        Commands::Validate(args) => {
+            print_validate(&args.manifest, args.ignore_warnings)?;
+        }
+        Commands::Download(args) => {
+            let mut repository = Repository::open()?;
+            let result = repository.show(&args.query.into())?;
+            do_download(&result, args.download_directory.as_deref())?;
+        }
+        Commands::Pin { command } => match command {
+            PinCommands::List => {
+                print_pin_list();
+            }
+        },
     }
 
     Ok(())
@@ -1358,4 +1429,327 @@ fn truncate(value: &str, width: usize) -> String {
         .collect::<String>();
     output.push('…');
     output
+}
+
+fn print_validate(manifest_path: &str, ignore_warnings: bool) -> Result<()> {
+    use std::path::Path;
+
+    let path = Path::new(manifest_path);
+    if !path.exists() {
+        bail!("Path does not exist: {manifest_path}");
+    }
+
+    let files: Vec<std::path::PathBuf> = if path.is_dir() {
+        std::fs::read_dir(path)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|ext| ext == "yaml" || ext == "yml")
+            })
+            .collect()
+    } else {
+        vec![path.to_path_buf()]
+    };
+
+    if files.is_empty() {
+        bail!("No YAML manifest files found in: {manifest_path}");
+    }
+
+    let mut all_errors: Vec<String> = Vec::new();
+    let mut all_warnings: Vec<String> = Vec::new();
+
+    // Schema base path — relative to the repo root or binary
+    let schema_base = find_schema_dir();
+
+    for file in &files {
+        let content = std::fs::read_to_string(file)?;
+        let yaml_value: serde_json::Value = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("YAML parse error in {}: {e}", file.display()))?;
+
+        let manifest_type = yaml_value
+            .get("ManifestType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("singleton")
+            .to_lowercase();
+        let manifest_version = yaml_value
+            .get("ManifestVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.1.0");
+
+        let schema_version = map_manifest_version(manifest_version);
+        let schema_file_name = format!("manifest.{manifest_type}.{manifest_version}.json");
+
+        if let Some(ref base) = schema_base {
+            let schema_path = base.join(&schema_version).join(&schema_file_name);
+            if schema_path.exists() {
+                let schema_content = std::fs::read_to_string(&schema_path)?;
+                let schema_json: serde_json::Value = serde_json::from_str(&schema_content)?;
+
+                let validator = match jsonschema::validator_for(&schema_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        all_warnings.push(format!(
+                            "  {}: could not compile schema {}: {e}",
+                            file.display(),
+                            schema_path.display()
+                        ));
+                        continue;
+                    }
+                };
+
+                let result = validator.validate(&yaml_value);
+                if let Err(error) = result {
+                    let msg = format!(
+                        "  {}: {} (at {})",
+                        file.display(),
+                        error,
+                        error.instance_path
+                    );
+                    all_errors.push(msg);
+                }
+            } else {
+                all_warnings.push(format!(
+                    "  {}: schema not found: {}",
+                    file.display(),
+                    schema_path.display()
+                ));
+            }
+        } else {
+            // No schema dir — just do basic YAML parse validation
+            all_warnings.push(format!(
+                "  {}: schema directory not found, performing YAML-only validation",
+                file.display()
+            ));
+        }
+
+        // Basic field checks
+        if manifest_type == "singleton" || manifest_type == "installer" {
+            if yaml_value.get("Installers").is_none() {
+                all_errors.push(format!(
+                    "  {}: required field 'Installers' is missing",
+                    file.display()
+                ));
+            }
+        }
+        if manifest_type == "singleton" || manifest_type == "defaultlocale" {
+            for field in ["PackageIdentifier", "PackageVersion"] {
+                if yaml_value.get(field).is_none()
+                    && manifest_version != "0.1.0"
+                {
+                    all_errors.push(format!(
+                        "  {}: required field '{field}' is missing",
+                        file.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !all_warnings.is_empty() && !ignore_warnings {
+        println!("Manifest validation warning.");
+        for w in &all_warnings {
+            println!("{w}");
+        }
+    }
+
+    if !all_errors.is_empty() {
+        println!("Manifest validation failed.");
+        for e in &all_errors {
+            println!("{e}");
+        }
+        std::process::exit(1);
+    }
+
+    if all_warnings.is_empty() || ignore_warnings {
+        println!("Manifest validation succeeded.");
+    }
+
+    Ok(())
+}
+
+fn find_schema_dir() -> Option<std::path::PathBuf> {
+    // Try relative to the current exe first, then walk up looking for schemas/JSON/manifests
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..10 {
+            if let Some(ref d) = dir {
+                let candidate = d.join("schemas").join("JSON").join("manifests");
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+                dir = d.parent().map(|p| p.to_path_buf());
+            } else {
+                break;
+            }
+        }
+    }
+    // Try from cwd
+    let mut dir = std::env::current_dir().ok();
+    for _ in 0..10 {
+        if let Some(ref d) = dir {
+            let candidate = d.join("schemas").join("JSON").join("manifests");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn map_manifest_version(version: &str) -> String {
+    // Map version strings to schema directory names
+    // "1.6.0" -> "v1.6.0", "0.1.0" -> "preview", "latest" -> "latest"
+    if version == "0.1.0" {
+        "preview".to_string()
+    } else if version.starts_with("1.") {
+        format!("v{version}")
+    } else {
+        "latest".to_string()
+    }
+}
+
+fn do_download(result: &ShowResult, download_dir: Option<&str>) -> Result<()> {
+    let installer = result
+        .manifest
+        .installers
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No installer found for package"))?;
+
+    let url = installer
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("No installer URL found"))?;
+
+    let dir = match download_dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::current_dir()?,
+    };
+
+    std::fs::create_dir_all(&dir)?;
+
+    // Derive filename from URL
+    let filename = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("installer")
+        .split('?')
+        .next()
+        .unwrap_or("installer");
+    let dest = dir.join(filename);
+
+    println!(
+        "Downloading {} v{} ...",
+        result.manifest.id, result.manifest.version
+    );
+    println!("  URL: {url}");
+    println!("  Destination: {}", dest.display());
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+    let response = client.get(url).send()?;
+    if !response.status().is_success() {
+        bail!(
+            "Download failed: HTTP {}",
+            response.status()
+        );
+    }
+    let bytes = response.bytes()?;
+    std::fs::write(&dest, &bytes)?;
+
+    // Verify hash if available
+    if let Some(ref expected_sha) = installer.sha256 {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hash = hasher.finalize();
+        let actual_sha = hash
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        if actual_sha.eq_ignore_ascii_case(expected_sha) {
+            println!("  SHA256 verified: {expected_sha}");
+        } else {
+            println!("  SHA256 MISMATCH! Expected: {expected_sha}, Got: {actual_sha}");
+            std::process::exit(1);
+        }
+    }
+
+    println!("Download complete: {}", dest.display());
+    Ok(())
+}
+
+fn print_pin_list() {
+    // Pinning database is at %LOCALAPPDATA%\Microsoft\WinGet\pins.db
+    // For now, try to open and list any pins, or say none found
+    let pins_path = dirs::data_local_dir()
+        .map(|d| d.join("Microsoft").join("WinGet").join("pins.db"));
+
+    match pins_path {
+        Some(ref path) if path.exists() => {
+            match rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                Ok(conn) => {
+                    // Try to read pin entries
+                    let mut stmt = match conn.prepare(
+                        "SELECT package_id, version, source_id, pin_type FROM pin",
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            println!("No pins found.");
+                            return;
+                        }
+                    };
+
+                    let rows: Vec<(String, String, String, i64)> = stmt
+                        .query_map([], |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                            ))
+                        })
+                        .ok()
+                        .map(|r| r.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default();
+
+                    if rows.is_empty() {
+                        println!("No pins found.");
+                        return;
+                    }
+
+                    println!(
+                        "{:<40} {:<20} {:<15} {}",
+                        "Package Id", "Version", "Source", "Pin Type"
+                    );
+                    println!("{}", "-".repeat(85));
+                    for (id, version, source, pin_type) in &rows {
+                        let type_str = match pin_type {
+                            0 => "Pinning",
+                            1 => "Blocking",
+                            2 => "Gating",
+                            _ => "Unknown",
+                        };
+                        println!(
+                            "{:<40} {:<20} {:<15} {}",
+                            id, version, source, type_str
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("Could not open pins database: {e}");
+                }
+            }
+        }
+        _ => {
+            println!("No pins found.");
+        }
+    }
 }
