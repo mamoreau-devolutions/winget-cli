@@ -632,7 +632,7 @@ return rootCommand.Invoke(args);
 
 static void PrintInfo()
 {
-    Console.WriteLine($"winget-dotnet v{Version}");
+    Console.WriteLine($"winget v{Version}");
     Console.WriteLine("Pure C# subset of the Windows Package Manager CLI");
     Console.WriteLine($"Runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
     Console.WriteLine($"OS: {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
@@ -644,13 +644,33 @@ static void PrintSearch(SearchResponse result)
     if (result.Matches.Count == 0) { Console.WriteLine("No package matched the supplied query."); return; }
 
     bool showMatch = result.Matches.Any(m => m.MatchCriteria is not null);
-    string[] headers = showMatch
-        ? ["Name", "Id", "Version", "Match", "Source"]
-        : ["Name", "Id", "Version", "Source"];
-    var rows = result.Matches.Select(m => showMatch
-        ? new[] { m.Name, m.Id, m.Version ?? "Unknown", m.MatchCriteria ?? "", m.SourceName }
-        : new[] { m.Name, m.Id, m.Version ?? "Unknown", m.SourceName }).ToList();
-    PrintTable(headers, rows);
+    if (showMatch)
+    {
+        Console.WriteLine("{0,-32} {1,-40} {2,-18} {3,-24} Source", "Name", "Id", "Version", "Match");
+        foreach (var m in result.Matches)
+        {
+            Console.WriteLine(
+                "{0,-32} {1,-40} {2,-18} {3,-24} {4}",
+                Trunc(m.Name, 32),
+                Trunc(m.Id, 40),
+                m.Version ?? "Unknown",
+                Trunc(m.MatchCriteria ?? "", 24),
+                m.SourceName);
+        }
+    }
+    else
+    {
+        Console.WriteLine("{0,-36} {1,-42} {2,-18} Source", "Name", "Id", "Version");
+        foreach (var m in result.Matches)
+        {
+            Console.WriteLine(
+                "{0,-36} {1,-42} {2,-18} {3}",
+                Trunc(m.Name, 36),
+                Trunc(m.Id, 42),
+                m.Version ?? "Unknown",
+                m.SourceName);
+        }
+    }
 
     if (result.Truncated) Console.WriteLine($"<additional entries truncated due to result limit>");
 }
@@ -837,7 +857,7 @@ static (string Symbol, string Description)? LookupHresult(long code)
 
 static void PrintWarnings(List<string> warnings) { foreach (var w in warnings) Console.Error.WriteLine($"warning: {w}"); }
 static void PrintOpt(string label, string? value) { if (value is not null) Console.WriteLine($"{label}: {value}"); }
-static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "\u2026";
+static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + ".";
 
 static void PrintTable(string[] headers, List<string[]> rows)
 {
@@ -866,8 +886,8 @@ static void PrintTable(string[] headers, List<string[]> rows)
     }
 
     int totalWidth = widths.Zip(spaceAfter, (w, s) => w + (s ? 1 : 0)).Sum();
-    int consoleWidth = 120;
-    try { consoleWidth = Console.WindowWidth; } catch { }
+    int consoleWidth = 119;
+    try { consoleWidth = Math.Max(1, Console.WindowWidth - 2); } catch { }
     if (totalWidth >= consoleWidth)
     {
         int extra = totalWidth - consoleWidth + 1;

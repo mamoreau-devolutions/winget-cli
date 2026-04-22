@@ -1,11 +1,12 @@
 param(
     [string]$RustWinget = (Join-Path $PSScriptRoot "..\target\debug\winget.exe"),
-    [string]$DotnetWinget = (Join-Path $PSScriptRoot "..\..\winget-dotnet\src\WinGetCli\bin\Debug\net9.0\winget-dotnet.exe"),
+    [string]$DotnetWinget = (Join-Path $PSScriptRoot "..\..\winget-dotnet\src\WinGetCli\bin\Debug\net9.0\winget.exe"),
     [string]$SystemWinget = "winget",
     [string[]]$Cases,
     [switch]$NoDotnet,
     [switch]$NoRust,
-    [switch]$NoSystem
+    [switch]$NoSystem,
+    [switch]$UpdateSources
 )
 
 $defaultCases = @(
@@ -129,6 +130,23 @@ function Invoke-WingetCapture {
     }
 }
 
+function Invoke-WingetCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    Write-Host "Updating sources for $Label..." -ForegroundColor DarkGray
+    & $Executable @Arguments | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label source update failed with exit code $LASTEXITCODE"
+    }
+}
+
 function Normalize-WingetOutput {
     param(
         [Parameter(Mandatory = $true)]
@@ -175,6 +193,18 @@ function Select-CaseSet {
     }
 
     return @($selected)
+}
+
+if ($UpdateSources) {
+    if (-not $NoRust) {
+        Invoke-WingetCommand -Executable $RustWinget -Arguments @("source", "update") -Label "Rust"
+    }
+    if (-not $NoDotnet) {
+        Invoke-WingetCommand -Executable $DotnetWinget -Arguments @("source", "update") -Label "Dotnet"
+    }
+    if (-not $NoSystem) {
+        Invoke-WingetCommand -Executable $SystemWinget -Arguments @("source", "update") -Label "System"
+    }
 }
 
 function Write-CaseReport {

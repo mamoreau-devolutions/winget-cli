@@ -101,7 +101,7 @@ internal static class RestSource
             ? d.EnumerateArray().ToList()
             : [];
 
-        int maxResults = semantics == SearchSemantics.Single ? 2 : query.Count ?? 50;
+        int maxResults = SourceFetchResults(query, semantics);
         var results = new List<RestMatchResult>();
 
         foreach (var item in data)
@@ -154,7 +154,7 @@ internal static class RestSource
     private static string BuildSearchBody(PackageQuery query, RestInformation info, SearchSemantics semantics)
     {
         var obj = new JsonObject();
-        int maxResults = semantics == SearchSemantics.Single ? 2 : query.Count ?? 50;
+        int maxResults = SourceFetchResults(query, semantics);
         obj["MaximumResults"] = maxResults;
 
         var filters = new JsonArray();
@@ -216,6 +216,13 @@ internal static class RestSource
                 }
             });
         }
+    }
+
+    private static int SourceFetchResults(PackageQuery query, SearchSemantics semantics)
+    {
+        if (semantics == SearchSemantics.Single)
+            return 2;
+        return Math.Max(query.Count ?? 50, 50);
     }
 
     private static List<VersionKey> ParseVersions(JsonElement item)

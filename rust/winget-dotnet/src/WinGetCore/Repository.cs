@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using YamlDotNet.Core;
@@ -314,7 +315,9 @@ public class Repository : IDisposable
 
         if (semantics == SearchSemantics.Many)
         {
-            matches.Sort((a, b) => -SearchMatchSortScore(a.Display, query).CompareTo(SearchMatchSortScore(b.Display, query)));
+            matches = matches
+                .OrderByDescending(m => SearchMatchSortScore(m.Display, query))
+                .ToList();
             int limit = query.Count ?? 50;
             if (matches.Count > limit)
             {
@@ -567,37 +570,30 @@ public class Repository : IDisposable
 
     internal static Installer? SelectInstaller(List<Installer> installers, PackageQuery query)
     {
-        if (installers.Count == 0) return null;
+        if (installers.Count == 0)
+            return null;
 
-        var candidates = installers.AsEnumerable();
+        var requestedLocale = query.Locale;
+        var requestedArchitecture = query.InstallerArchitecture;
+        var requestedType = query.InstallerType;
+        var requestedScope = query.InstallScope;
+        var systemArchitecture = CurrentArchitecture();
 
-        if (query.InstallerArchitecture is not null)
-            candidates = candidates.Where(i =>
-                i.Architecture?.Equals(query.InstallerArchitecture, StringComparison.OrdinalIgnoreCase) == true);
-
-        if (query.InstallerType is not null)
-            candidates = candidates.Where(i =>
-                i.InstallerType?.Equals(query.InstallerType, StringComparison.OrdinalIgnoreCase) == true);
-
-        if (query.Locale is not null)
-            candidates = candidates.Where(i =>
-                i.Locale is null || i.Locale.Equals(query.Locale, StringComparison.OrdinalIgnoreCase));
-
-        if (query.InstallScope is not null)
-            candidates = candidates.Where(i =>
-                i.Scope is null || i.Scope.Equals(query.InstallScope, StringComparison.OrdinalIgnoreCase));
-
-        var list = candidates.ToList();
-        if (list.Count == 0) return null;
-
-        // Prefer x64 > x86 > neutral
-        return list.OrderByDescending(i => i.Architecture?.ToLowerInvariant() switch
-        {
-            "x64" => 3,
-            "x86" => 2,
-            "arm64" => 1,
-            _ => 0
-        }).First();
+        return installers
+            .Where(installer => InstallerMatchesRequested(installer, requestedType, requestedScope))
+            .Where(installer => InstallerMatchesArchitecture(installer, requestedArchitecture, systemArchitecture))
+            .Select((installer, index) => new
+            {
+                Installer = installer,
+                Index = index,
+                Rank = InstallerRank(installer, requestedLocale, requestedArchitecture, systemArchitecture),
+            })
+            .OrderByDescending(item => item.Rank.Architecture)
+            .ThenByDescending(item => item.Rank.Locale)
+            .ThenByDescending(item => item.Rank.Commands)
+            .ThenBy(item => item.Index)
+            .Select(item => item.Installer)
+            .FirstOrDefault();
     }
 
     // ── Manifest parsing ──
@@ -795,37 +791,45 @@ public class Repository : IDisposable
 
     private static bool ListPackageMatches(InstalledPackage pkg, ListQuery query)
     {
-        if (query.Query is null && query.Id is null && query.Name is null &&
-            query.Moniker is null && query.Tag is null && query.Command is null)
-            return true;
+        var correlated = pkg.Correlated;
+
+        if (query.Id is not null)
+        {
+            var localMatch = MatchesText(pkg.LocalId, query.Id, query.Exact);
+            var correlatedMatch = correlated is not null && MatchesText(correlated.Id, query.Id, query.Exact);
+            if (!localMatch && !correlatedMatch)
+                return false;
+        }
+
+        if (query.Name is not null && !MatchesText(pkg.Name, query.Name, query.Exact))
+            return false;
 
         if (query.Query is not null)
         {
-            var q = query.Query;
-            if (pkg.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                pkg.LocalId.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                (pkg.Correlated?.Id.Contains(q, StringComparison.OrdinalIgnoreCase) == true) ||
-                (pkg.Correlated?.Name.Contains(q, StringComparison.OrdinalIgnoreCase) == true))
-                return true;
+            var localMatch = MatchesText(pkg.Name, query.Query, query.Exact) ||
+                MatchesText(pkg.LocalId, query.Query, query.Exact);
+            var correlatedMatch = correlated is not null &&
+                (MatchesText(correlated.Id, query.Query, query.Exact) ||
+                 MatchesText(correlated.Name, query.Query, query.Exact));
+            if (!localMatch && !correlatedMatch)
+                return false;
         }
 
-        if (query.Id is not null && (pkg.LocalId.Contains(query.Id, StringComparison.OrdinalIgnoreCase) ||
-            pkg.Correlated?.Id.Contains(query.Id, StringComparison.OrdinalIgnoreCase) == true))
-            return true;
+        if (query.Source is not null &&
+            (correlated?.SourceName is null ||
+             !correlated.SourceName.Equals(query.Source, StringComparison.OrdinalIgnoreCase)))
+            return false;
 
-        if (query.Name is not null && pkg.Name.Contains(query.Name, StringComparison.OrdinalIgnoreCase))
-            return true;
+        if ((query.Moniker is not null || query.Tag is not null || query.Command is not null) &&
+            correlated is null)
+            return false;
 
-        return false;
+        return true;
     }
 
-    private static bool InstalledPackageMatchesUpgradeFilter(InstalledPackage pkg, ListQuery query)
-    {
-        if (pkg.Correlated is null) return query.IncludeUnknown;
-        var availableVersion = pkg.Correlated.Version;
-        if (availableVersion is null) return false;
-        return RestSource.CompareVersionStrings(availableVersion, pkg.InstalledVersion) > 0;
-    }
+    private static bool InstalledPackageMatchesUpgradeFilter(InstalledPackage pkg, ListQuery query) =>
+        InstalledPackageHasUpgrade(pkg) ||
+        (query.IncludeUnknown && InstalledPackageHasUnknownVersion(pkg) && pkg.Correlated is not null);
 
     private static int ListSortWeight(InstalledPackage pkg)
     {
@@ -841,7 +845,7 @@ public class Repository : IDisposable
         string? availableVersion = null;
         if (pkg.Correlated?.Version is string av)
         {
-            if (string.IsNullOrEmpty(pkg.InstalledVersion) ||
+            if (InstalledPackageHasUnknownVersion(pkg) ||
                 RestSource.CompareVersionStrings(av, pkg.InstalledVersion) > 0)
                 availableVersion = av;
         }
@@ -869,6 +873,114 @@ public class Repository : IDisposable
 
     private static bool AllowLooseListCorrelation(ListQuery query) => !query.Exact;
 
+    private static bool MatchesText(string candidate, string query, bool exact) =>
+        exact
+            ? candidate.Equals(query, StringComparison.OrdinalIgnoreCase)
+            : candidate.Contains(query, StringComparison.OrdinalIgnoreCase);
+
+    private static bool InstalledPackageHasUnknownVersion(InstalledPackage pkg) =>
+        pkg.InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+
+    private static bool InstalledPackageHasUpgrade(InstalledPackage pkg) =>
+        pkg.Correlated?.Version is string availableVersion &&
+        RestSource.CompareVersionStrings(availableVersion, pkg.InstalledVersion) > 0;
+
+    private static bool InstallerMatchesRequested(Installer installer, string? requestedType, string? requestedScope) =>
+        MatchesOptionalCaseInsensitive(installer.InstallerType, requestedType) &&
+        MatchesOptionalCaseInsensitive(installer.Scope, requestedScope);
+
+    private static bool InstallerMatchesArchitecture(Installer installer, string? requestedArchitecture, string systemArchitecture)
+    {
+        if (installer.Architecture is null)
+            return true;
+
+        if (requestedArchitecture is not null)
+            return installer.Architecture.Equals(requestedArchitecture, StringComparison.OrdinalIgnoreCase);
+
+        return PreferredArchitectures(systemArchitecture)
+            .Any(candidate => installer.Architecture.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static (int Architecture, int Locale, int Commands) InstallerRank(
+        Installer installer,
+        string? requestedLocale,
+        string? requestedArchitecture,
+        string systemArchitecture)
+    {
+        var architecture = ArchitectureRank(
+            installer.Architecture,
+            requestedArchitecture ?? systemArchitecture,
+            requestedArchitecture is not null,
+            systemArchitecture);
+        var locale = LocaleRank(installer.Locale, requestedLocale);
+        var commands = installer.Commands.Count == 0 ? 0 : 1;
+        return (architecture, locale, commands);
+    }
+
+    private static int ArchitectureRank(
+        string? installerArchitecture,
+        string preferredArchitecture,
+        bool strict,
+        string systemArchitecture)
+    {
+        if (installerArchitecture is null)
+            return 0;
+        if (installerArchitecture.Equals(preferredArchitecture, StringComparison.OrdinalIgnoreCase))
+            return 5;
+        if (installerArchitecture.Equals("neutral", StringComparison.OrdinalIgnoreCase))
+            return 4;
+        if (strict)
+            return -1;
+
+        var preferred = PreferredArchitectures(systemArchitecture);
+        for (int i = preferred.Length - 1; i >= 0; i--)
+        {
+            if (installerArchitecture.Equals(preferred[i], StringComparison.OrdinalIgnoreCase))
+                return preferred.Length - i;
+        }
+        return -1;
+    }
+
+    private static int LocaleRank(string? installerLocale, string? requestedLocale)
+    {
+        if (installerLocale is not null && requestedLocale is not null &&
+            installerLocale.Equals(requestedLocale, StringComparison.OrdinalIgnoreCase))
+            return 3;
+
+        if (installerLocale is not null && requestedLocale is not null)
+        {
+            var installerLanguage = installerLocale.Split('-')[0];
+            var requestedLanguage = requestedLocale.Split('-')[0];
+            if (installerLanguage.Equals(requestedLanguage, StringComparison.OrdinalIgnoreCase))
+                return 2;
+            return -1;
+        }
+
+        if ((installerLocale is null) != (requestedLocale is null))
+            return 1;
+
+        return 0;
+    }
+
+    private static bool MatchesOptionalCaseInsensitive(string? value, string? requested) =>
+        requested is null || (value is not null && value.Equals(requested, StringComparison.OrdinalIgnoreCase));
+
+    private static string CurrentArchitecture() => RuntimeInformation.OSArchitecture switch
+    {
+        Architecture.X64 => "x64",
+        Architecture.X86 => "x86",
+        Architecture.Arm64 => "arm64",
+        _ => "neutral",
+    };
+
+    private static string[] PreferredArchitectures(string systemArchitecture) => systemArchitecture switch
+    {
+        "arm64" => ["arm64", "neutral", "x64", "x86"],
+        "x64" => ["x64", "neutral", "x86"],
+        "x86" => ["x86", "neutral"],
+        _ => ["neutral"],
+    };
+
     private static PackageQuery PackageQueryFromListQuery(ListQuery query) => new()
     {
         Query = query.Query, Id = query.Id, Name = query.Name, Moniker = query.Moniker,
@@ -893,17 +1005,87 @@ public class Repository : IDisposable
 
     private static int SearchMatchSortScore(SearchMatch match, PackageQuery query)
     {
-        if (query.Query is null && query.Id is null && query.Name is null) return 0;
+        var score = 0;
 
-        var q = query.Query ?? query.Id ?? query.Name ?? "";
-        if (match.Id.Equals(q, StringComparison.OrdinalIgnoreCase)) return 100;
-        if (match.Name.Equals(q, StringComparison.OrdinalIgnoreCase)) return 90;
-        if (match.Id.StartsWith(q, StringComparison.OrdinalIgnoreCase)) return 80;
-        if (match.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase)) return 70;
-        if (match.Id.Contains(q, StringComparison.OrdinalIgnoreCase)) return 60;
-        if (match.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) return 50;
-        return 10; // tag/command/moniker match
+        if (query.Query is not null)
+        {
+            score = Math.Max(score, ScoreTextMatch(match.Name, query.Query, query.Exact, 140, 50, 30));
+            score = Math.Max(score, ScoreTextMatch(match.Id, query.Query, query.Exact, 135, 45, 25));
+            if (match.Moniker is not null)
+                score = Math.Max(score, ScoreTextMatch(match.Moniker, query.Query, query.Exact, 130, 55, 35));
+        }
+
+        if (query.Id is not null)
+            score = Math.Max(score, ScoreTextMatch(match.Id, query.Id, query.Exact, 220, 200, 180));
+
+        if (query.Name is not null)
+            score = Math.Max(score, ScoreTextMatch(match.Name, query.Name, query.Exact, 210, 190, 170));
+
+        if (query.Moniker is not null && match.Moniker is not null)
+            score = Math.Max(score, ScoreTextMatch(match.Moniker, query.Moniker, query.Exact, 205, 185, 165));
+
+        if (query.Tag is not null &&
+            TryParseMatchCriteria(match.MatchCriteria, out var tagField, out var tagValue) &&
+            tagField == "Tag")
+        {
+            score = Math.Max(score, ScoreTextMatch(tagValue, query.Tag, query.Exact, 160, 150, 140));
+        }
+
+        if (query.Command is not null &&
+            TryParseMatchCriteria(match.MatchCriteria, out var commandField, out var commandValue) &&
+            commandField == "Command")
+        {
+            score = Math.Max(score, ScoreTextMatch(commandValue, query.Command, query.Exact, 155, 145, 135));
+        }
+
+        if (match.SourceKind == SourceKind.PreIndexed)
+            score += 5;
+
+        if (SearchMatchHasUnknownVersion(match))
+            score = Math.Max(0, score - 10);
+
+        return score;
     }
+
+    private static int ScoreTextMatch(
+        string candidate,
+        string query,
+        bool exact,
+        int exactScore,
+        int prefixScore,
+        int substringScore)
+    {
+        if (candidate.Equals(query, StringComparison.OrdinalIgnoreCase))
+            return exactScore;
+
+        if (exact)
+            return 0;
+
+        if (candidate.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+            return prefixScore;
+
+        return candidate.Contains(query, StringComparison.OrdinalIgnoreCase) ? substringScore : 0;
+    }
+
+    private static bool TryParseMatchCriteria(string? matchCriteria, out string field, out string value)
+    {
+        field = "";
+        value = "";
+
+        if (string.IsNullOrEmpty(matchCriteria))
+            return false;
+
+        var separator = matchCriteria.IndexOf(':');
+        if (separator <= 0 || separator >= matchCriteria.Length - 1)
+            return false;
+
+        field = matchCriteria[..separator];
+        value = matchCriteria[(separator + 1)..].TrimStart();
+        return true;
+    }
+
+    private static bool SearchMatchHasUnknownVersion(SearchMatch match) =>
+        match.Version is not null && match.Version.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
 
     // ── Utilities ──
 

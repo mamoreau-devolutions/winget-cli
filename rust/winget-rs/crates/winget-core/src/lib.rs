@@ -2866,19 +2866,6 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
         if let Some(moniker) = candidate.moniker.as_deref() {
             score = score.max(score_text_match(moniker, value, query.exact, 130, 55, 35));
         }
-        if let Some((field, matched_value)) = candidate
-            .match_criteria
-            .as_deref()
-            .and_then(parse_match_criteria)
-        {
-            let field_score = match field {
-                "Tag" => score_text_match(matched_value, value, query.exact, 60, 50, 40),
-                "Command" => score_text_match(matched_value, value, query.exact, 55, 45, 35),
-                "Moniker" => score_text_match(matched_value, value, query.exact, 125, 55, 35),
-                _ => 0,
-            };
-            score = score.max(field_score);
-        }
     }
 
     if let Some(value) = &query.id {
@@ -2943,7 +2930,7 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
         score += 5;
     }
     if search_match_has_unknown_version(candidate) {
-        score = score.saturating_sub(40);
+        score = score.saturating_sub(10);
     }
 
     score
@@ -3441,18 +3428,25 @@ fn select_installer(installers: &[Installer], query: &PackageQuery) -> Option<In
 
     installers
         .iter()
-        .filter(|installer| installer_matches_requested(installer, requested_type, requested_scope))
-        .filter(|installer| {
+        .enumerate()
+        .filter(|(_, installer)| {
+            installer_matches_requested(installer, requested_type, requested_scope)
+        })
+        .filter(|(_, installer)| {
             installer_matches_architecture(installer, requested_architecture, system_architecture)
         })
-        .max_by_key(|installer| {
-            installer_rank(
-                installer,
-                requested_locale,
-                requested_architecture,
-                system_architecture,
+        .max_by_key(|(index, installer)| {
+            (
+                installer_rank(
+                    installer,
+                    requested_locale,
+                    requested_architecture,
+                    system_architecture,
+                ),
+                std::cmp::Reverse(*index),
             )
         })
+        .map(|(_, installer)| installer)
         .cloned()
 }
 
@@ -4077,6 +4071,43 @@ mod tests {
     }
 
     #[test]
+    fn selects_first_installer_when_rank_ties() {
+        let installers = vec![
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("machine".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+        ];
+
+        let selected = select_installer(&installers, &PackageQuery::default()).expect("selected installer");
+        assert_eq!(selected.scope.as_deref(), Some("machine"));
+    }
+
+    #[test]
     fn derives_correlation_name_candidates() {
         let candidates = correlation_name_candidates("PowerToys (Preview) x64");
         assert!(candidates.contains(&"PowerToys (Preview) x64".to_string()));
@@ -4346,7 +4377,7 @@ mod tests {
     }
 
     #[test]
-    fn search_ranking_demotes_unknown_version_result() {
+    fn search_ranking_prefers_direct_name_match_even_with_unknown_version() {
         let query = PackageQuery {
             query: Some("PowerToys".to_string()),
             ..Default::default()
@@ -4373,8 +4404,8 @@ mod tests {
         };
 
         assert!(
-            search_match_sort_score(&tag_match, &query)
-                > search_match_sort_score(&unknown_version, &query)
+            search_match_sort_score(&unknown_version, &query)
+                > search_match_sort_score(&tag_match, &query)
         );
     }
 
@@ -4390,7 +4421,7 @@ mod tests {
     }
 
     #[test]
-    fn search_ranking_prefers_exact_tag_over_plain_name_prefix() {
+    fn search_ranking_prefers_direct_name_prefix_over_tag_only_match() {
         let query = PackageQuery {
             query: Some("PowerToys".to_string()),
             ..Default::default()
@@ -4417,8 +4448,8 @@ mod tests {
         };
 
         assert!(
-            search_match_sort_score(&exact_tag, &query)
-                > search_match_sort_score(&prefix_name, &query)
+            search_match_sort_score(&prefix_name, &query)
+                > search_match_sort_score(&exact_tag, &query)
         );
     }
 

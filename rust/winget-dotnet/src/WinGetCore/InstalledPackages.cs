@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using Microsoft.Data.Sqlite;
 
 namespace WinGetCore;
 
@@ -75,26 +74,53 @@ internal static class InstalledPackages
                         var installLocation = subkey.GetValue("InstallLocation") as string;
                         if (IsWindowsSystemPath(installLocation)) continue;
 
-                        var version = subkey.GetValue("DisplayVersion") as string ?? "";
-                        var publisher = subkey.GetValue("Publisher") as string;
+                        if (subkey.GetValue("ParentKeyName") is string)
+                            continue;
 
-                        var dedupKey = $"{displayName}|{version}|{scopeLabel}";
+                        var version = subkey.GetValue("DisplayVersion") as string ?? "Unknown";
+                        var publisher = subkey.GetValue("Publisher") as string;
+                        var packageFamilyName = subkey.GetValue("PackageFamilyName") as string;
+                        var productCode = subkey.GetValue("ProductCode") as string;
+                        var upgradeCode = subkey.GetValue("UpgradeCode") as string;
+
+                        var localId = $@"ARP\{scopeLabel}\{effectiveArch}\{subkeyName}";
+                        var installerCategory = localId.StartsWith(@"ARP\", StringComparison.OrdinalIgnoreCase) &&
+                            subkey.GetValue("WindowsInstaller") is int windowsInstaller && windowsInstaller == 1
+                                ? "msi"
+                                : subkeyName.StartsWith("MSIX\\", StringComparison.OrdinalIgnoreCase)
+                                    ? "msix"
+                                    : "exe";
+
+                        var dedupKey =
+                            $"{localId}|{displayName.ToLowerInvariant()}|{version.ToLowerInvariant()}|{(publisher ?? "").ToLowerInvariant()}";
                         if (!seen.Add(dedupKey)) continue;
 
+                        var packageFamilyNames = new List<string>();
+                        if (!string.IsNullOrWhiteSpace(packageFamilyName))
+                            packageFamilyNames.Add(packageFamilyName);
+
                         var productCodes = new List<string>();
+                        if (!string.IsNullOrWhiteSpace(productCode))
+                            productCodes.Add(productCode);
                         if (LooksLikeProductCode(subkeyName))
-                            productCodes.Add(subkeyName);
+                            productCodes.Add(subkeyName.ToLowerInvariant());
+
+                        var upgradeCodes = new List<string>();
+                        if (!string.IsNullOrWhiteSpace(upgradeCode))
+                            upgradeCodes.Add(upgradeCode);
 
                         packages.Add(new InstalledPackage
                         {
                             Name = displayName,
-                            LocalId = $@"ARP\{scopeLabel}\{effectiveArch}\{subkeyName}",
+                            LocalId = localId,
                             InstalledVersion = version,
                             Publisher = publisher,
                             Scope = scopeLabel,
-                            InstallerCategory = effectiveArch,
+                            InstallerCategory = installerCategory,
                             InstallLocation = installLocation,
+                            PackageFamilyNames = packageFamilyNames,
                             ProductCodes = productCodes,
+                            UpgradeCodes = upgradeCodes,
                         });
                     }
                     catch { /* skip unreadable subkey */ }
@@ -110,58 +136,50 @@ internal static class InstalledPackages
         Microsoft.Win32.RegistryHive hive, string scopeLabel,
         Microsoft.Win32.RegistryView view)
     {
-        // Read from StateRepository-Machine.srd (SQLite)
-        var srdPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles).Replace("Program Files", "ProgramData"),
-            @"Microsoft\Windows\AppRepository\StateRepository-Machine.srd");
-
-        // Try a more standard path
-        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        srdPath = Path.Combine(programData, @"Microsoft\Windows\AppRepository\StateRepository-Machine.srd");
-
-        if (!File.Exists(srdPath)) return;
+        const string appModelPackagesPath =
+            @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
 
         try
         {
-            using var conn = new SqliteConnection($"Data Source={srdPath};Mode=ReadOnly");
-            conn.Open();
+            using var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(hive, view);
+            using var appModelKey = baseKey.OpenSubKey(appModelPackagesPath);
+            if (appModelKey is null) return;
 
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                SELECT p.PackageFullName, p.PackageFamilyName,
-                       COALESCE(p.DisplayName, '') AS DisplayName,
-                       COALESCE(p.Publisher, '') AS Publisher
-                FROM Package p
-                WHERE p.IsInbox = 0 AND p.IsFramework = 0
-                ORDER BY p.PackageFullName";
-
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            foreach (var subkeyName in appModelKey.GetSubKeyNames())
             {
-                var fullName = reader.GetString(0);
-                var familyName = reader.GetString(1);
-                var displayName = reader.GetString(2);
-                var publisher = reader.GetString(3);
+                using var subkey = appModelKey.OpenSubKey(subkeyName);
+                if (subkey is null)
+                    continue;
 
-                var parsed = ParseMsixFullName(fullName);
+                var displayName = subkey.GetValue("DisplayName") as string;
+                if (string.IsNullOrWhiteSpace(displayName))
+                    continue;
+
+                var installLocation = subkey.GetValue("PackageRootFolder") as string;
+                if (IsWindowsSystemPath(installLocation))
+                    continue;
+
+                var parsed = ParseMsixFullName(subkeyName);
                 if (parsed is null) continue;
 
-                var dedupKey = $"MSIX|{familyName}|{parsed.Value.Version}|{scopeLabel}";
+                var localId = $@"MSIX\{subkeyName}";
+                var dedupKey = $"{localId}|{displayName.ToLowerInvariant()}|{parsed.Value.Version.ToLowerInvariant()}";
                 if (!seen.Add(dedupKey)) continue;
 
                 packages.Add(new InstalledPackage
                 {
-                    Name = string.IsNullOrEmpty(displayName) ? familyName : displayName,
-                    LocalId = $@"MSIX\{familyName}",
+                    Name = displayName,
+                    LocalId = localId,
                     InstalledVersion = parsed.Value.Version,
-                    Publisher = string.IsNullOrEmpty(publisher) ? null : publisher,
+                    Publisher = null,
                     Scope = scopeLabel,
-                    InstallerCategory = "MSIX",
-                    PackageFamilyNames = [familyName],
+                    InstallerCategory = "msix",
+                    InstallLocation = installLocation,
+                    PackageFamilyNames = [parsed.Value.FamilyName],
                 });
             }
         }
-        catch { /* AppModel DB not accessible */ }
+        catch { /* AppModel registry not accessible */ }
     }
 
     private static bool IsWindowsSystemPath(string? path)
@@ -175,12 +193,23 @@ internal static class InstalledPackages
 
     private static (string Version, string FamilyName)? ParseMsixFullName(string fullName)
     {
-        // Format: Name_Version_Arch_ResourceId_PublisherHash
         var parts = fullName.Split('_');
         if (parts.Length < 5) return null;
-        var version = parts[1];
-        var publisherHash = parts[^1];
-        var familyName = $"{parts[0]}_{publisherHash}";
+
+        var name = string.Join("_", parts.Take(parts.Length - 4));
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+
+        var version = parts[^4].Trim();
+        var resourceId = parts[^2].Trim();
+        var publisherHash = parts[^1].Trim();
+        if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(publisherHash))
+            return null;
+
+        var familyName = string.IsNullOrWhiteSpace(resourceId)
+            ? $"{name}_{publisherHash}"
+            : $"{name}_{resourceId}_{publisherHash}";
+
         return (version, familyName);
     }
 }

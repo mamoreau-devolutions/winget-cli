@@ -338,9 +338,9 @@ internal static class PreIndexedSource
         if (query.Moniker is not null)
             return (SingleFieldCondition("moniker", query.Moniker, exact, parameters), parameters);
         if (query.Tag is not null)
-            return (MappedFieldCondition(true, "tag", query.Tag, "packages.rowid", exact, parameters), parameters);
+            return (MappedFieldCondition(true, "tag", query.Tag, "packages.rowid", true, parameters), parameters);
         if (query.Command is not null)
-            return (MappedFieldCondition(true, "command", query.Command, "packages.rowid", exact, parameters), parameters);
+            return (MappedFieldCondition(true, "command", query.Command, "packages.rowid", true, parameters), parameters);
 
         if (query.Query is not null)
         {
@@ -388,9 +388,9 @@ internal static class PreIndexedSource
         if (query.Moniker is not null)
             return (SingleFieldCondition("monikers.moniker", query.Moniker, exact, parameters), parameters);
         if (query.Tag is not null)
-            return (MappedFieldCondition(false, "tag", query.Tag, "manifest.rowid", exact, parameters), parameters);
+            return (MappedFieldCondition(false, "tag", query.Tag, "manifest.rowid", true, parameters), parameters);
         if (query.Command is not null)
-            return (MappedFieldCondition(false, "command", query.Command, "manifest.rowid", exact, parameters), parameters);
+            return (MappedFieldCondition(false, "command", query.Command, "manifest.rowid", true, parameters), parameters);
 
         if (query.Query is not null)
         {
@@ -543,7 +543,7 @@ internal static class PreIndexedSource
     private static int MaxResults(PackageQuery query, SearchSemantics semantics)
     {
         if (semantics == SearchSemantics.Single) return 2;
-        return query.Count ?? 50;
+        return Math.Max(query.Count ?? 50, 50);
     }
 
     // Internal row types

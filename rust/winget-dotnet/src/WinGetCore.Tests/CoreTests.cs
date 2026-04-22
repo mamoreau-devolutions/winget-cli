@@ -102,3 +102,53 @@ public class PinStoreTests
         Assert.DoesNotContain(PinStore.List(), p => p.PackageId == "Test.Package.Unit");
     }
 }
+
+public class RepositoryParityTests
+{
+    [Fact]
+    public void SelectInstaller_PrefersRustStyleRanking()
+    {
+        var installers = new List<Installer>
+        {
+            new()
+            {
+                Architecture = "x64",
+                InstallerType = "exe",
+                Scope = "user",
+                Locale = "en-US",
+            },
+            new()
+            {
+                Architecture = "x64",
+                InstallerType = "exe",
+                Scope = "machine",
+                Locale = "en-US",
+                Commands = ["powertoys"],
+            },
+        };
+
+        var selected = Repository.SelectInstaller(installers, new PackageQuery { InstallerType = "exe" });
+
+        Assert.NotNull(selected);
+        Assert.Equal("machine", selected!.Scope);
+    }
+
+    [Fact]
+    public void SelectInstaller_PrefersLanguageFallbackOverMismatchedLocale()
+    {
+        var installers = new List<Installer>
+        {
+            new() { Architecture = "x64", InstallerType = "exe", Locale = "fr-FR" },
+            new() { Architecture = "x64", InstallerType = "exe", Locale = "en-GB" },
+        };
+
+        var selected = Repository.SelectInstaller(installers, new PackageQuery
+        {
+            InstallerType = "exe",
+            Locale = "en-US",
+        });
+
+        Assert.NotNull(selected);
+        Assert.Equal("en-GB", selected!.Locale);
+    }
+}

@@ -1581,7 +1581,7 @@ fn truncate(value: &str, width: usize) -> String {
         .chars()
         .take(width.saturating_sub(1))
         .collect::<String>();
-    output.push('…');
+    output.push('.');
     output
 }
 
