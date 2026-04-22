@@ -8,6 +8,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use std::path::Path;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -248,6 +249,42 @@ pub struct SourceUpdateResult {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PinRecord {
+    pub package_id: String,
+    pub version: String,
+    pub source_id: String,
+    pub pin_type: PinType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum PinType {
+    Pinning,
+    Blocking,
+    Gating,
+}
+
+impl std::fmt::Display for PinType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PinType::Pinning => f.write_str("Pinning"),
+            PinType::Blocking => f.write_str("Blocking"),
+            PinType::Gating => f.write_str("Gating"),
+        }
+    }
+}
+
+/// Result of an install/uninstall/upgrade operation
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstallResult {
+    pub package_id: String,
+    pub version: String,
+    pub installer_path: PathBuf,
+    pub installer_type: String,
+    pub exit_code: i32,
+    pub success: bool,
+}
+
 #[derive(Debug, Clone)]
 struct InstalledPackage {
     name: String,
@@ -353,6 +390,56 @@ impl Repository {
 
     pub fn list_sources(&self) -> Vec<SourceRecord> {
         self.store.sources.clone()
+    }
+
+    pub fn add_source(&mut self, name: &str, arg: &str, kind: SourceKind) -> Result<()> {
+        if self.store.sources.iter().any(|s| s.name == name) {
+            bail!("A source with name '{name}' already exists.");
+        }
+        if self.store.sources.iter().any(|s| s.arg == arg) {
+            bail!("A source with argument '{arg}' already exists.");
+        }
+        let identifier = name.to_string();
+        self.store.sources.push(SourceRecord {
+            name: name.to_string(),
+            kind,
+            arg: arg.to_string(),
+            identifier,
+            last_update: None,
+            source_version: None,
+        });
+        save_store(&self.store)?;
+        Ok(())
+    }
+
+    pub fn remove_source(&mut self, name: &str) -> Result<()> {
+        let idx = self
+            .store
+            .sources
+            .iter()
+            .position(|s| s.name == name)
+            .ok_or_else(|| anyhow!("Source '{name}' not found."))?;
+        let source = self.store.sources.remove(idx);
+        // Clean up cached state for this source
+        let state_dir = source_state_dir(&source);
+        if state_dir.exists() {
+            let _ = fs::remove_dir_all(&state_dir);
+        }
+        save_store(&self.store)?;
+        Ok(())
+    }
+
+    pub fn reset_sources(&mut self) -> Result<()> {
+        // Remove cached state for all current sources
+        for source in &self.store.sources {
+            let state_dir = source_state_dir(source);
+            if state_dir.exists() {
+                let _ = fs::remove_dir_all(&state_dir);
+            }
+        }
+        self.store = SourceStore::default();
+        save_store(&self.store)?;
+        Ok(())
     }
 
     pub fn update_sources(&mut self, source_name: Option<&str>) -> Result<Vec<SourceUpdateResult>> {
@@ -536,6 +623,199 @@ impl Repository {
             package: located.display,
             cached_files,
             warnings,
+        })
+    }
+
+    // ── Pin management ──
+
+    pub fn list_pins(&self) -> Result<Vec<PinRecord>> {
+        let db_path = pins_db_path();
+        if !db_path.exists() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut stmt = conn.prepare("SELECT package_id, version, source_id, pin_type FROM pin")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let pin_type_int: i64 = row.get(3)?;
+                Ok(PinRecord {
+                    package_id: row.get(0)?,
+                    version: row.get(1)?,
+                    source_id: row.get(2)?,
+                    pin_type: match pin_type_int {
+                        1 => PinType::Blocking,
+                        2 => PinType::Gating,
+                        _ => PinType::Pinning,
+                    },
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn add_pin(
+        &self,
+        package_id: &str,
+        version: &str,
+        source_id: &str,
+        pin_type: PinType,
+    ) -> Result<()> {
+        let db_path = pins_db_path();
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pin (
+                package_id TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '*',
+                source_id TEXT NOT NULL DEFAULT '',
+                pin_type INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (package_id, source_id)
+            )",
+        )?;
+        let type_int: i64 = match pin_type {
+            PinType::Pinning => 0,
+            PinType::Blocking => 1,
+            PinType::Gating => 2,
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO pin (package_id, version, source_id, pin_type) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![package_id, version, source_id, type_int],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_pin(&self, package_id: &str) -> Result<bool> {
+        let db_path = pins_db_path();
+        if !db_path.exists() {
+            return Ok(false);
+        }
+        let conn = Connection::open(&db_path)?;
+        let count = conn.execute(
+            "DELETE FROM pin WHERE package_id = ?1",
+            rusqlite::params![package_id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn reset_pins(&self) -> Result<()> {
+        let db_path = pins_db_path();
+        if db_path.exists() {
+            fs::remove_file(&db_path)?;
+        }
+        Ok(())
+    }
+
+    // ── Install / download ──
+
+    pub fn download_installer(
+        &mut self,
+        query: &PackageQuery,
+        download_dir: &Path,
+    ) -> Result<(Manifest, PathBuf)> {
+        let (located, _warnings) = self.find_single_match(query)?;
+        let (manifest, _cached_files) = self.manifest_for_match(&located, query)?;
+        let installer = select_installer(&manifest.installers, query)
+            .ok_or_else(|| anyhow!("No applicable installer found for the current system"))?;
+        let url = installer
+            .url
+            .as_deref()
+            .ok_or_else(|| anyhow!("Installer has no URL"))?;
+
+        fs::create_dir_all(download_dir)?;
+        let filename = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("installer")
+            .split('?')
+            .next()
+            .unwrap_or("installer");
+        let dest = download_dir.join(filename);
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .context("failed to download installer")?;
+        if !response.status().is_success() {
+            bail!("Download failed: HTTP {}", response.status());
+        }
+        let bytes = response.bytes()?;
+        fs::write(&dest, &bytes)?;
+
+        // Verify hash
+        if let Some(ref expected_sha) = installer.sha256 {
+            let actual = sha256_hex(&bytes);
+            if !actual.eq_ignore_ascii_case(expected_sha) {
+                let _ = fs::remove_file(&dest);
+                bail!(
+                    "Installer hash mismatch. Expected: {expected_sha}, Got: {actual}"
+                );
+            }
+        }
+
+        Ok((manifest, dest))
+    }
+
+    pub fn install(&mut self, query: &PackageQuery, silent: bool) -> Result<InstallResult> {
+        let temp_dir = std::env::temp_dir().join("winget-rs-install");
+        let (manifest, installer_path) = self.download_installer(query, &temp_dir)?;
+        let installer = select_installer(&manifest.installers, query)
+            .ok_or_else(|| anyhow!("No applicable installer found"))?;
+
+        let installer_type = installer
+            .installer_type
+            .as_deref()
+            .unwrap_or("exe")
+            .to_lowercase();
+
+        let exit_code = dispatch_installer(&installer_path, &installer_type, silent, &installer)?;
+
+        Ok(InstallResult {
+            package_id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            installer_path,
+            installer_type,
+            exit_code,
+            success: exit_code == 0,
+        })
+    }
+
+    pub fn uninstall(&mut self, query: &PackageQuery, silent: bool) -> Result<InstallResult> {
+        let list_query = ListQuery {
+            query: query.query.clone(),
+            id: query.id.clone(),
+            name: query.name.clone(),
+            moniker: query.moniker.clone(),
+            tag: None,
+            command: None,
+            source: query.source.clone(),
+            count: Some(10),
+            exact: false,
+            install_scope: None,
+            upgrade_only: false,
+            include_unknown: false,
+            include_pinned: false,
+        };
+        let list_result = self.list(&list_query)?;
+
+        let installed = list_result
+            .matches
+            .first()
+            .ok_or_else(|| anyhow!("No installed package found matching the query"))?;
+
+        let uninstall_id = installed.id.clone();
+        let version = installed.installed_version.clone();
+
+        // Try to find uninstall information from ARP registry
+        let exit_code = uninstall_package(&uninstall_id, silent)?;
+
+        Ok(InstallResult {
+            package_id: uninstall_id,
+            version,
+            installer_path: PathBuf::new(),
+            installer_type: "uninstall".to_string(),
+            exit_code,
+            success: exit_code == 0,
         })
     }
 
@@ -3466,6 +3746,149 @@ fn sha256_hex(bytes: &[u8]) -> String {
         output.push_str(&format!("{byte:02X}"));
     }
     output
+}
+
+fn pins_db_path() -> PathBuf {
+    // WinGet pins DB: %LOCALAPPDATA%\Microsoft\WinGet\pins.db
+    // Our own pins: %LOCALAPPDATA%\winget-rs\pins.db
+    app_root().expect("app root").join("pins.db")
+}
+
+#[cfg(windows)]
+fn dispatch_installer(
+    installer_path: &Path,
+    installer_type: &str,
+    silent: bool,
+    installer: &Installer,
+) -> Result<i32> {
+    use std::process::Command;
+
+    match installer_type {
+        "msi" | "wix" => {
+            let mut cmd = Command::new("msiexec");
+            cmd.arg("/i").arg(installer_path);
+            if silent {
+                cmd.arg("/quiet").arg("/norestart");
+            } else {
+                cmd.arg("/passive").arg("/norestart");
+            }
+            let status = cmd.status().context("failed to run msiexec")?;
+            Ok(status.code().unwrap_or(-1))
+        }
+        "msix" | "appx" => {
+            let mut cmd = Command::new("powershell");
+            cmd.arg("-NoProfile")
+                .arg("-Command")
+                .arg(format!(
+                    "Add-AppxPackage -Path '{}'",
+                    installer_path.display()
+                ));
+            let status = cmd.status().context("failed to run Add-AppxPackage")?;
+            Ok(status.code().unwrap_or(-1))
+        }
+        "zip" => {
+            let target = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Programs");
+            fs::create_dir_all(&target)?;
+            let file = fs::File::open(installer_path)?;
+            let mut archive = zip::ZipArchive::new(file)?;
+            archive.extract(&target)?;
+            Ok(0)
+        }
+        // exe, inno, nullsoft, burn, etc.
+        _ => {
+            let mut cmd = Command::new(installer_path);
+            if silent {
+                // Try common silent switches
+                cmd.arg("/S").arg("/SILENT").arg("/VERYSILENT");
+            }
+            // Apply custom switches from manifest if available
+            if let Some(ref commands) = installer.commands.first() {
+                if !commands.is_empty() {
+                    cmd.arg(commands);
+                }
+            }
+            let _ = &installer; // suppress unused
+            let status = cmd.status().context("failed to run installer")?;
+            Ok(status.code().unwrap_or(-1))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn dispatch_installer(
+    _installer_path: &Path,
+    _installer_type: &str,
+    _silent: bool,
+    _installer: &Installer,
+) -> Result<i32> {
+    bail!("Installing packages is only supported on Windows")
+}
+
+#[cfg(windows)]
+fn uninstall_package(package_id: &str, silent: bool) -> Result<i32> {
+    use std::process::Command;
+
+    // Search ARP registry for uninstall command
+    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+
+    let arp_paths = [
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+
+    for root in [&hklm, &hkcu] {
+        for arp_path in &arp_paths {
+            if let Ok(key) = root.open_subkey(arp_path) {
+                for subkey_name in key.enum_keys().filter_map(|k| k.ok()) {
+                    if let Ok(subkey) = key.open_subkey(&subkey_name) {
+                        let display_name: String =
+                            subkey.get_value("DisplayName").unwrap_or_default();
+                        if subkey_name.eq_ignore_ascii_case(package_id)
+                            || display_name.eq_ignore_ascii_case(package_id)
+                        {
+                            // Found it — try QuietUninstallString first, then UninstallString
+                            let uninstall_cmd: String = subkey
+                                .get_value("QuietUninstallString")
+                                .or_else(|_| subkey.get_value("UninstallString"))
+                                .context("No uninstall command found in registry")?;
+
+                            let mut cmd = Command::new("cmd");
+                            cmd.arg("/C").arg(&uninstall_cmd);
+                            if silent {
+                                // Append common silent flags if not already quiet
+                                if !uninstall_cmd.contains("/S")
+                                    && !uninstall_cmd.contains("/quiet")
+                                {
+                                    cmd.arg("/S");
+                                }
+                            }
+                            let status =
+                                cmd.status().context("failed to run uninstaller")?;
+                            return Ok(status.code().unwrap_or(-1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Try MSIX removal
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
+        .arg("-Command")
+        .arg(format!(
+            "Get-AppxPackage -Name '*{package_id}*' | Remove-AppxPackage"
+        ));
+    let status = cmd.status().context("failed to run Remove-AppxPackage")?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+#[cfg(not(windows))]
+fn uninstall_package(_package_id: &str, _silent: bool) -> Result<i32> {
+    bail!("Uninstalling packages is only supported on Windows")
 }
 
 #[cfg(test)]

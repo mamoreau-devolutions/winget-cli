@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use winget_core::{
-    CacheWarmResult, Documentation, ListQuery, ListResponse, PackageQuery, Repository,
-    SearchResponse, ShowResult, SourceRecord, SourceUpdateResult, VersionsResult,
+    CacheWarmResult, Documentation, InstallResult, ListQuery, ListResponse, PackageQuery, PinType,
+    Repository, SearchResponse, ShowResult, SourceKind, SourceRecord, SourceUpdateResult,
+    VersionsResult,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -50,6 +51,9 @@ enum Commands {
         #[command(subcommand)]
         command: PinCommands,
     },
+    Install(InstallArgs),
+    Uninstall(UninstallArgs),
+    Import(ImportArgs),
 }
 
 #[derive(Subcommand)]
@@ -57,6 +61,12 @@ enum SourceCommands {
     List,
     Update { source: Option<String> },
     Export,
+    Add(SourceAddArgs),
+    Remove { name: String },
+    Reset {
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +156,55 @@ struct DownloadArgs {
 #[derive(Subcommand)]
 enum PinCommands {
     List,
+    Add(PinAddArgs),
+    Remove { package: String },
+    Reset {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Args)]
+struct SourceAddArgs {
+    name: String,
+    arg: String,
+    #[arg(long = "type", default_value = "rest")]
+    kind: String,
+}
+
+#[derive(Args)]
+struct PinAddArgs {
+    package: String,
+    #[arg(long, default_value = "*")]
+    version: String,
+    #[arg(long)]
+    blocking: bool,
+}
+
+#[derive(Args, Clone)]
+struct InstallArgs {
+    #[command(flatten)]
+    query: QueryArgs,
+    #[arg(long)]
+    silent: bool,
+    #[arg(long)]
+    interactive: bool,
+}
+
+#[derive(Args, Clone)]
+struct UninstallArgs {
+    #[command(flatten)]
+    query: QueryArgs,
+    #[arg(long)]
+    silent: bool,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    #[arg(short = 'i', long = "import-file")]
+    import_file: String,
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 #[derive(Args, Clone)]
@@ -336,14 +395,32 @@ fn run() -> Result<()> {
             }
         }
         Commands::Source { command } => {
-            let repository = Repository::open()?;
+            let mut repository = Repository::open()?;
             match command {
                 SourceCommands::List => print_sources(repository.list_sources()),
                 SourceCommands::Update { source } => {
-                    let mut repository = repository;
                     print_source_updates(repository.update_sources(source.as_deref())?)
                 }
                 SourceCommands::Export => print_source_export(&repository),
+                SourceCommands::Add(args) => {
+                    let kind = match args.kind.as_str() {
+                        "preindexed" | "PreIndexed" => SourceKind::PreIndexed,
+                        _ => SourceKind::Rest,
+                    };
+                    repository.add_source(&args.name, &args.arg, kind)?;
+                    println!("Done");
+                }
+                SourceCommands::Remove { name } => {
+                    repository.remove_source(&name)?;
+                    println!("Done");
+                }
+                SourceCommands::Reset { force } => {
+                    if !force {
+                        bail!("Resetting all sources requires --force");
+                    }
+                    repository.reset_sources()?;
+                    println!("Done");
+                }
             }
         }
         Commands::Cache { command } => {
@@ -376,11 +453,68 @@ fn run() -> Result<()> {
             let result = repository.show(&args.query.into())?;
             do_download(&result, args.download_directory.as_deref())?;
         }
-        Commands::Pin { command } => match command {
-            PinCommands::List => {
-                print_pin_list();
+        Commands::Pin { command } => {
+            let repository = Repository::open()?;
+            match command {
+                PinCommands::List => {
+                    let pins = repository.list_pins()?;
+                    if pins.is_empty() {
+                        println!("No pins found.");
+                    } else {
+                        println!(
+                            "{:<40} {:<20} {:<15} {}",
+                            "Package Id", "Version", "Source", "Pin Type"
+                        );
+                        println!("{}", "-".repeat(85));
+                        for pin in &pins {
+                            println!(
+                                "{:<40} {:<20} {:<15} {}",
+                                pin.package_id, pin.version, pin.source_id, pin.pin_type
+                            );
+                        }
+                    }
+                }
+                PinCommands::Add(args) => {
+                    let pin_type = if args.blocking {
+                        PinType::Blocking
+                    } else {
+                        PinType::Pinning
+                    };
+                    repository.add_pin(&args.package, &args.version, "", pin_type)?;
+                    println!("Pin added for {}", args.package);
+                }
+                PinCommands::Remove { package } => {
+                    if repository.remove_pin(&package)? {
+                        println!("Pin removed for {package}");
+                    } else {
+                        println!("No pin found for {package}");
+                    }
+                }
+                PinCommands::Reset { force } => {
+                    if !force {
+                        bail!("Resetting all pins requires --force");
+                    }
+                    repository.reset_pins()?;
+                    println!("All pins have been reset.");
+                }
             }
-        },
+        }
+        Commands::Install(args) => {
+            let mut repository = Repository::open()?;
+            let silent = args.silent;
+            let result = repository.install(&args.query.into(), silent)?;
+            print_install_result(&result);
+        }
+        Commands::Uninstall(args) => {
+            let mut repository = Repository::open()?;
+            let silent = args.silent;
+            let result = repository.uninstall(&args.query.into(), silent)?;
+            print_install_result(&result);
+        }
+        Commands::Import(args) => {
+            let mut repository = Repository::open()?;
+            do_import(&mut repository, &args.import_file, args.dry_run)?;
+        }
     }
 
     Ok(())
@@ -1647,73 +1781,103 @@ fn do_download(result: &ShowResult, download_dir: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn print_pin_list() {
-    // Pinning database is at %LOCALAPPDATA%\Microsoft\WinGet\pins.db
-    // For now, try to open and list any pins, or say none found
-    let pins_path = dirs::data_local_dir()
-        .map(|d| d.join("Microsoft").join("WinGet").join("pins.db"));
+fn print_install_result(result: &InstallResult) {
+    if result.success {
+        println!(
+            "Successfully {} {} v{}",
+            if result.installer_type == "uninstall" {
+                "uninstalled"
+            } else {
+                "installed"
+            },
+            result.package_id,
+            result.version
+        );
+    } else {
+        eprintln!(
+            "Failed to {} {} v{} (exit code: {})",
+            if result.installer_type == "uninstall" {
+                "uninstall"
+            } else {
+                "install"
+            },
+            result.package_id,
+            result.version,
+            result.exit_code
+        );
+        std::process::exit(result.exit_code);
+    }
+}
 
-    match pins_path {
-        Some(ref path) if path.exists() => {
-            match rusqlite::Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            ) {
-                Ok(conn) => {
-                    // Try to read pin entries
-                    let mut stmt = match conn.prepare(
-                        "SELECT package_id, version, source_id, pin_type FROM pin",
-                    ) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            println!("No pins found.");
-                            return;
-                        }
-                    };
+fn do_import(repository: &mut Repository, file_path: &str, dry_run: bool) -> Result<()> {
+    let content = std::fs::read_to_string(file_path)?;
+    let doc: serde_json::Value = serde_json::from_str(&content)?;
 
-                    let rows: Vec<(String, String, String, i64)> = stmt
-                        .query_map([], |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                            ))
-                        })
-                        .ok()
-                        .map(|r| r.filter_map(|r| r.ok()).collect())
-                        .unwrap_or_default();
+    let sources = doc
+        .get("Sources")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Invalid import file: missing 'Sources' array"))?;
 
-                    if rows.is_empty() {
-                        println!("No pins found.");
-                        return;
-                    }
+    let mut total = 0;
+    let mut found = 0;
+    let mut not_found = 0;
 
-                    println!(
-                        "{:<40} {:<20} {:<15} {}",
-                        "Package Id", "Version", "Source", "Pin Type"
-                    );
-                    println!("{}", "-".repeat(85));
-                    for (id, version, source, pin_type) in &rows {
-                        let type_str = match pin_type {
-                            0 => "Pinning",
-                            1 => "Blocking",
-                            2 => "Gating",
-                            _ => "Unknown",
-                        };
+    for source in sources {
+        let source_name = source
+            .get("SourceDetails")
+            .and_then(|s| s.get("Name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        let packages = source
+            .get("Packages")
+            .and_then(|p| p.as_array())
+            .unwrap_or(&Vec::new())
+            .clone();
+
+        for package in &packages {
+            let id = package
+                .get("PackageIdentifier")
+                .and_then(|i| i.as_str())
+                .unwrap_or("?");
+            total += 1;
+
+            let query = PackageQuery {
+                id: Some(id.to_string()),
+                source: Some(source_name.to_string()),
+                ..Default::default()
+            };
+
+            match repository.search(&query) {
+                Ok(result) if !result.matches.is_empty() => {
+                    let m = &result.matches[0];
+                    if dry_run {
+                        println!("  [found] {} v{} ({})", m.id, m.version.as_deref().unwrap_or("?"), source_name);
+                    } else {
                         println!(
-                            "{:<40} {:<20} {:<15} {}",
-                            id, version, source, type_str
+                            "  Installing {} v{} from {}...",
+                            m.id, m.version.as_deref().unwrap_or("?"), source_name
                         );
+                        match repository.install(&query, true) {
+                            Ok(r) if r.success => println!("    OK"),
+                            Ok(r) => println!("    FAILED (exit {})", r.exit_code),
+                            Err(e) => println!("    ERROR: {e}"),
+                        }
                     }
+                    found += 1;
                 }
-                Err(e) => {
-                    println!("Could not open pins database: {e}");
+                _ => {
+                    println!("  [not found] {id} ({source_name})");
+                    not_found += 1;
                 }
             }
         }
-        _ => {
-            println!("No pins found.");
-        }
     }
+
+    println!();
+    if dry_run {
+        println!("Dry run: {total} packages, {found} found, {not_found} not found");
+    } else {
+        println!("Import: {total} packages, {found} attempted, {not_found} not found");
+    }
+    Ok(())
 }
