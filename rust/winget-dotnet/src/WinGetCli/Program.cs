@@ -711,9 +711,18 @@ static void PrintShow(ShowResult result)
         Console.WriteLine("Installer:");
         PrintOpt("  Type", inst.InstallerType);
         PrintOpt("  Architecture", inst.Architecture);
-        PrintOpt("  Url", inst.Url);
-        PrintOpt("  SHA256", inst.Sha256);
+        PrintOpt("  Locale", inst.Locale);
         PrintOpt("  Scope", inst.Scope);
+        PrintOpt("  Url", inst.Url);
+        PrintOpt("  Sha256", inst.Sha256);
+        PrintOpt("  ProductCode", inst.ProductCode);
+        PrintOpt("  ReleaseDate", inst.ReleaseDate);
+    }
+
+    if (result.Manifest.PackageDependencies.Count > 0)
+    {
+        Console.Write("Dependencies:");
+        Console.WriteLine($" {string.Join(", ", result.Manifest.PackageDependencies)}");
     }
 }
 

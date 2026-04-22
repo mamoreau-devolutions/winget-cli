@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
+using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -605,11 +606,22 @@ public class Repository : IDisposable
     {
         var yaml = System.Text.Encoding.UTF8.GetString(bytes);
         var deserializer = new DeserializerBuilder()
-            .WithNamingConvention(PascalCaseNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
             .Build();
 
-        var dict = deserializer.Deserialize<Dictionary<string, object?>>(yaml) ?? [];
+        // Merge all YAML documents into one dictionary (manifests can be multi-document)
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        var parser = new YamlDotNet.Core.Parser(new StringReader(yaml));
+        parser.Consume<YamlDotNet.Core.Events.StreamStart>();
+        while (parser.Accept<YamlDotNet.Core.Events.DocumentStart>(out _))
+        {
+            var doc = deserializer.Deserialize<Dictionary<string, object?>>(parser);
+            if (doc is not null)
+            {
+                foreach (var kvp in doc)
+                    dict[kvp.Key] = kvp.Value;
+            }
+        }
 
         string GetStr(string key) => dict.TryGetValue(key, out var v) ? v?.ToString() ?? "" : "";
         string? GetOptStr(string key) => dict.TryGetValue(key, out var v) && v is not null ? v.ToString() : null;
@@ -636,6 +648,15 @@ public class Repository : IDisposable
             }
         }
 
+        // Top-level installer defaults (merged manifest format)
+        string? topInstallerType = GetOptStr("InstallerType");
+        string? topScope = GetOptStr("Scope");
+        string? topProductCode = GetOptStr("ProductCode");
+        string? topLocale = GetOptStr("InstallerLocale");
+        string? topReleaseDate = GetOptStr("ReleaseDate");
+        string? topPackageFamilyName = GetOptStr("PackageFamilyName");
+        string? topUpgradeCode = GetOptStr("UpgradeCode");
+
         var installers = new List<Installer>();
         if (dict.TryGetValue("Installers", out var instObj) && instObj is IList<object> instList)
         {
@@ -653,18 +674,32 @@ public class Repository : IDisposable
                     installers.Add(new Installer
                     {
                         Architecture = InstStr("Architecture"),
-                        InstallerType = InstStr("InstallerType"),
+                        InstallerType = InstStr("InstallerType") ?? topInstallerType,
                         Url = InstStr("InstallerUrl"),
                         Sha256 = InstStr("InstallerSha256"),
-                        ProductCode = InstStr("ProductCode"),
-                        Locale = InstStr("InstallerLocale"),
-                        Scope = InstStr("Scope"),
-                        ReleaseDate = InstStr("ReleaseDate"),
-                        PackageFamilyName = InstStr("PackageFamilyName"),
-                        UpgradeCode = InstStr("UpgradeCode"),
+                        ProductCode = InstStr("ProductCode") ?? topProductCode,
+                        Locale = InstStr("InstallerLocale") ?? topLocale,
+                        Scope = InstStr("Scope") ?? topScope,
+                        ReleaseDate = InstStr("ReleaseDate") ?? topReleaseDate,
+                        PackageFamilyName = InstStr("PackageFamilyName") ?? topPackageFamilyName,
+                        UpgradeCode = InstStr("UpgradeCode") ?? topUpgradeCode,
                         Commands = InstArr("Commands"),
                         PackageDependencies = InstArr("PackageDependencies"),
                     });
+                }
+            }
+        }
+
+        var dependencies = new List<string>();
+        if (dict.TryGetValue("Dependencies", out var depsObj) && depsObj is IDictionary<object, object> depsDict)
+        {
+            if (depsDict.TryGetValue("PackageDependencies", out var pkgDeps) && pkgDeps is IList<object> pkgDepList)
+            {
+                foreach (var dep in pkgDepList)
+                {
+                    if (dep is IDictionary<object, object> depDict &&
+                        depDict.TryGetValue("PackageIdentifier", out var pid))
+                        dependencies.Add(pid?.ToString() ?? "");
                 }
             }
         }
@@ -691,6 +726,7 @@ public class Repository : IDisposable
             Tags = tags,
             Documentation = docs,
             Installers = installers,
+            PackageDependencies = dependencies,
         };
     }
 
