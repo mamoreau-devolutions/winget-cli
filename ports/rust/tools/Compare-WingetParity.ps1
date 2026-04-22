@@ -1,6 +1,6 @@
 param(
     [string]$RustWinget = (Join-Path $PSScriptRoot "..\target\debug\winget.exe"),
-    [string]$DotnetWinget = (Join-Path $PSScriptRoot "..\..\winget-dotnet\src\WinGetCli\bin\Debug\net9.0\winget.exe"),
+    [string]$DotnetWinget = (Join-Path $PSScriptRoot "..\..\dotnet\src\WinGetCli\bin\Debug\net9.0\winget.exe"),
     [string]$SystemWinget = "winget",
     [string[]]$Cases,
     [switch]$NoDotnet,
