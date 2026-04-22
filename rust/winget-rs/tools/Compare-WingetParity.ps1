@@ -49,6 +49,26 @@ $defaultCases = @(
         Args = @("search", "Microsoft.PowerToys", "--count", "1")
         RustArgs = @("search", "Microsoft.PowerToys", "--count", "1", "--output", "json")
         CompareMode = "rust-only"
+    },
+    @{
+        Name = "source-roundtrip"
+        Args = @("source", "add", "test-parity", "https://example.com/test", "--type", "rest")
+        CompareMode = "rust-only"
+        PostSteps = @(
+            @{ Args = @("source", "list"); Label = "after-add" },
+            @{ Args = @("source", "remove", "test-parity"); Label = "remove" },
+            @{ Args = @("source", "list"); Label = "after-remove" }
+        )
+    },
+    @{
+        Name = "pin-roundtrip"
+        Args = @("pin", "add", "Microsoft.PowerToys", "--version", "0.70.0")
+        CompareMode = "rust-only"
+        PostSteps = @(
+            @{ Args = @("pin", "list"); Label = "after-add" },
+            @{ Args = @("pin", "remove", "Microsoft.PowerToys"); Label = "remove" },
+            @{ Args = @("pin", "list"); Label = "after-remove" }
+        )
     }
 )
 
@@ -191,7 +211,15 @@ foreach ($case in $caseSet) {
         Write-Host ("STATUS : RUST-ONLY (exit={0})" -f $rustResult.ExitCode)
         Write-Host "--- RUST ---"
         $rustResult.NormalizedLines | ForEach-Object { Write-Host $_ }
-    } else {
+
+        # Run post-steps if defined (for round-trip tests)
+        if ($case.ContainsKey('PostSteps')) {
+            foreach ($step in $case.PostSteps) {
+                $stepResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $step.Args
+                Write-Host ("  [{0}] exit={1}: {2}" -f $step.Label, $stepResult.ExitCode, ($stepResult.NormalizedLines -join " | "))
+            }
+        }
+    }else {
         $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
         Write-CaseReport -Case $case -RustResult $rustResult -SystemResult $systemResult -CompareMode $compareMode
     }

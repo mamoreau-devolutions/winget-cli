@@ -114,6 +114,10 @@ struct UpgradeArgs {
     include_unknown: bool,
     #[arg(long = "include-pinned", visible_alias = "pinned")]
     include_pinned: bool,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    silent: bool,
 }
 
 #[derive(Args)]
@@ -386,12 +390,64 @@ fn run() -> Result<()> {
         }
         Commands::Upgrade(args) => {
             let mut repository = Repository::open()?;
+            let do_install = args.all
+                || args.query.is_some()
+                || args.query_option.is_some()
+                || args.id.is_some()
+                || args.name.is_some();
+            let silent = args.silent;
             let list_query = ListQuery::from(args);
             let result = repository.list(&list_query)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+
+            if !do_install {
+                // List mode only
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    print_list_result(result, false, true);
+                }
             } else {
-                print_list_result(result, false, true);
+                // Actually perform upgrades
+                let upgradeable: Vec<_> = result
+                    .matches
+                    .iter()
+                    .filter(|m| m.available_version.is_some())
+                    .collect();
+                if upgradeable.is_empty() {
+                    println!("No applicable upgrade found.");
+                } else {
+                    for m in &upgradeable {
+                        println!(
+                            "Upgrading {} from {} to {} ...",
+                            m.id,
+                            m.installed_version,
+                            m.available_version.as_deref().unwrap_or("?")
+                        );
+                        let query = PackageQuery {
+                            id: Some(m.id.clone()),
+                            source: m.source_name.clone(),
+                            ..Default::default()
+                        };
+                        match repository.install(&query, silent) {
+                            Ok(r) if r.success => {
+                                println!("  Successfully upgraded {}", m.id);
+                            }
+                            Ok(r) => {
+                                eprintln!(
+                                    "  Failed to upgrade {} (exit code: {})",
+                                    m.id, r.exit_code
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("  Error upgrading {}: {e}", m.id);
+                            }
+                        }
+                    }
+                    println!(
+                        "{} package(s) upgraded.",
+                        upgradeable.len()
+                    );
+                }
             }
         }
         Commands::Source { command } => {
