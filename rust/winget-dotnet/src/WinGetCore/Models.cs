@@ -26,6 +26,15 @@ public record SourceRecord
     public string? SourceVersion { get; set; }
 }
 
+/// <summary>
+/// Library-hosting options for the WinGet core API.
+/// </summary>
+public record RepositoryOptions
+{
+    public string? AppRoot { get; init; }
+    public string UserAgent { get; init; } = "winget-dotnet/0.1";
+}
+
 public record PackageQuery
 {
     public string? Query { get; init; }

@@ -35,31 +35,34 @@ internal partial class SourceStoreContext : JsonSerializerContext;
 
 internal static class SourceStoreManager
 {
-    private static string AppRoot()
+    public static string NormalizeAppRoot(string? appRoot)
     {
+        if (!string.IsNullOrWhiteSpace(appRoot))
+            return Path.GetFullPath(appRoot);
+
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(localAppData, "winget-dotnet");
     }
 
-    public static void EnsureAppDirs()
+    public static void EnsureAppDirs(string? appRoot = null)
     {
-        var root = AppRoot();
+        var root = NormalizeAppRoot(appRoot);
         Directory.CreateDirectory(root);
         Directory.CreateDirectory(Path.Combine(root, "sources"));
     }
 
-    public static string SourceStateDir(SourceRecord source)
+    public static string SourceStateDir(SourceRecord source, string? appRoot = null)
     {
         var safeName = string.Concat(source.Name.Select(c =>
             @"\/:*?""<>|".Contains(c) ? '_' : c));
-        return Path.Combine(AppRoot(), "sources", safeName);
+        return Path.Combine(NormalizeAppRoot(appRoot), "sources", safeName);
     }
 
-    public static string PinsDbPath() => Path.Combine(AppRoot(), "pins.db");
+    public static string PinsDbPath(string? appRoot = null) => Path.Combine(NormalizeAppRoot(appRoot), "pins.db");
 
-    public static SourceStore Load()
+    public static SourceStore Load(string? appRoot = null)
     {
-        var path = Path.Combine(AppRoot(), "sources.json");
+        var path = Path.Combine(NormalizeAppRoot(appRoot), "sources.json");
         if (!File.Exists(path))
             return SourceStore.Default();
 
@@ -67,9 +70,9 @@ internal static class SourceStoreManager
         return JsonSerializer.Deserialize(json, SourceStoreContext.Default.SourceStore) ?? SourceStore.Default();
     }
 
-    public static void Save(SourceStore store)
+    public static void Save(SourceStore store, string? appRoot = null)
     {
-        var path = Path.Combine(AppRoot(), "sources.json");
+        var path = Path.Combine(NormalizeAppRoot(appRoot), "sources.json");
         var json = JsonSerializer.Serialize(store, SourceStoreContext.Default.SourceStore);
         File.WriteAllText(path, json);
     }

@@ -7,15 +7,15 @@ internal static class PreIndexedSource
 {
     private static readonly string[] MsixCandidates = ["source2.msix", "source.msix"];
 
-    public static string IndexPath(SourceRecord source)
+    public static string IndexPath(SourceRecord source, string? appRoot = null)
     {
-        var stateDir = SourceStoreManager.SourceStateDir(source);
+        var stateDir = SourceStoreManager.SourceStateDir(source, appRoot);
         return Path.Combine(stateDir, "index.db");
     }
 
-    public static string Update(HttpClient client, SourceRecord source)
+    public static string Update(HttpClient client, SourceRecord source, string? appRoot = null)
     {
-        var stateDir = SourceStoreManager.SourceStateDir(source);
+        var stateDir = SourceStoreManager.SourceStateDir(source, appRoot);
         Directory.CreateDirectory(stateDir);
 
         Exception? lastError = null;
@@ -39,7 +39,7 @@ internal static class PreIndexedSource
                 var indexEntry = archive.GetEntry("Public/index.db")
                     ?? throw new InvalidOperationException($"No Public/index.db in {candidate}");
 
-                var indexPath = IndexPath(source);
+                var indexPath = IndexPath(source, appRoot);
                 indexEntry.ExtractToFile(indexPath, overwrite: true);
 
                 source.SourceVersion = headerVersion;
@@ -205,7 +205,7 @@ internal static class PreIndexedSource
 
     // V2 version data: fetch versionData.mszyml from CDN, decompress CK+deflate → YAML
     public static (List<V2VersionDataEntry> Entries, string VersionDataFile) LoadV2VersionData(
-        HttpClient client, SqliteConnection conn, SourceRecord source, long packageRowid, string packageHash)
+        HttpClient client, SqliteConnection conn, SourceRecord source, long packageRowid, string packageHash, string? appRoot = null)
     {
         // Resolve package id from packages table
         using var idCmd = conn.CreateCommand();
@@ -258,9 +258,9 @@ internal static class PreIndexedSource
         return bytes;
     }
 
-    public static byte[] GetCachedSourceFileFromMsix(SourceRecord source, string relativePath)
+    public static byte[] GetCachedSourceFileFromMsix(SourceRecord source, string relativePath, string? appRoot = null)
     {
-        var stateDir = SourceStoreManager.SourceStateDir(source);
+        var stateDir = SourceStoreManager.SourceStateDir(source, appRoot);
         foreach (var candidate in MsixCandidates)
         {
             var msixPath = Path.Combine(stateDir, candidate);

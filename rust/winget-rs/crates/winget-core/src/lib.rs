@@ -24,6 +24,7 @@ const DEFAULT_MARKET: &str = "US";
 const DEFAULT_MAX_RESULTS: usize = 50;
 const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
+const DEFAULT_USER_AGENT: &str = "winget-rs/0.1";
 const REST_SUPPORTED_CONTRACTS: &[&str] = &[
     "1.12.0", "1.10.0", "1.9.0", "1.7.0", "1.6.0", "1.5.0", "1.4.0", "1.1.0", "1.0.0",
 ];
@@ -83,6 +84,34 @@ impl Default for SourceStore {
                 },
             ],
         }
+    }
+}
+
+/// Options for embedding the WinGet core library in another application.
+#[derive(Debug, Clone)]
+pub struct RepositoryOptions {
+    pub app_root: PathBuf,
+    pub user_agent: String,
+}
+
+impl RepositoryOptions {
+    /// Creates library options that keep all persistent state under the supplied root.
+    pub fn new(app_root: impl Into<PathBuf>) -> Self {
+        Self {
+            app_root: app_root.into(),
+            user_agent: DEFAULT_USER_AGENT.to_string(),
+        }
+    }
+
+    /// Uses the default per-user app-data root that the CLI also uses.
+    pub fn for_current_user() -> Result<Self> {
+        Ok(Self::new(default_app_root()?))
+    }
+
+    /// Overrides the HTTP user-agent sent to source endpoints.
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
     }
 }
 
@@ -373,19 +402,34 @@ struct PackageVersionDataEntry {
 }
 
 pub struct Repository {
+    app_root: PathBuf,
     client: Client,
     store: SourceStore,
 }
 
 impl Repository {
+    /// Opens the repository with the default per-user CLI storage layout.
     pub fn open() -> Result<Self> {
-        ensure_app_dirs()?;
-        let store = load_store()?;
+        Self::open_with_options(RepositoryOptions::for_current_user()?)
+    }
+
+    /// Opens the repository with explicit hosting options for library consumers.
+    pub fn open_with_options(options: RepositoryOptions) -> Result<Self> {
+        ensure_app_dirs(&options.app_root)?;
+        let store = load_store(&options.app_root)?;
         let client = Client::builder()
-            .user_agent("winget-rs/0.1")
+            .user_agent(&options.user_agent)
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { client, store })
+        Ok(Self {
+            app_root: options.app_root,
+            client,
+            store,
+        })
+    }
+
+    pub fn app_root(&self) -> &Path {
+        &self.app_root
     }
 
     pub fn list_sources(&self) -> Vec<SourceRecord> {
@@ -408,7 +452,7 @@ impl Repository {
             last_update: None,
             source_version: None,
         });
-        save_store(&self.store)?;
+        self.save_store()?;
         Ok(())
     }
 
@@ -421,24 +465,24 @@ impl Repository {
             .ok_or_else(|| anyhow!("Source '{name}' not found."))?;
         let source = self.store.sources.remove(idx);
         // Clean up cached state for this source
-        let state_dir = source_state_dir(&source);
+        let state_dir = self.source_state_dir(&source);
         if state_dir.exists() {
             let _ = fs::remove_dir_all(&state_dir);
         }
-        save_store(&self.store)?;
+        self.save_store()?;
         Ok(())
     }
 
     pub fn reset_sources(&mut self) -> Result<()> {
         // Remove cached state for all current sources
         for source in &self.store.sources {
-            let state_dir = source_state_dir(source);
+            let state_dir = self.source_state_dir(source);
             if state_dir.exists() {
                 let _ = fs::remove_dir_all(&state_dir);
             }
         }
         self.store = SourceStore::default();
-        save_store(&self.store)?;
+        self.save_store()?;
         Ok(())
     }
 
@@ -459,7 +503,7 @@ impl Repository {
             });
         }
 
-        save_store(&self.store)?;
+        self.save_store()?;
         Ok(results)
     }
 
@@ -629,7 +673,7 @@ impl Repository {
     // ── Pin management ──
 
     pub fn list_pins(&self) -> Result<Vec<PinRecord>> {
-        let db_path = pins_db_path();
+        let db_path = pins_db_path(&self.app_root);
         if !db_path.exists() {
             return Ok(Vec::new());
         }
@@ -661,7 +705,7 @@ impl Repository {
         source_id: &str,
         pin_type: PinType,
     ) -> Result<()> {
-        let db_path = pins_db_path();
+        let db_path = pins_db_path(&self.app_root);
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS pin (
@@ -685,7 +729,7 @@ impl Repository {
     }
 
     pub fn remove_pin(&self, package_id: &str) -> Result<bool> {
-        let db_path = pins_db_path();
+        let db_path = pins_db_path(&self.app_root);
         if !db_path.exists() {
             return Ok(false);
         }
@@ -698,11 +742,19 @@ impl Repository {
     }
 
     pub fn reset_pins(&self) -> Result<()> {
-        let db_path = pins_db_path();
+        let db_path = pins_db_path(&self.app_root);
         if db_path.exists() {
             fs::remove_file(&db_path)?;
         }
         Ok(())
+    }
+
+    fn save_store(&self) -> Result<()> {
+        save_store(&self.app_root, &self.store)
+    }
+
+    fn source_state_dir(&self, source: &SourceRecord) -> PathBuf {
+        source_state_dir(&self.app_root, source)
     }
 
     // ── Install / download ──
@@ -1162,10 +1214,10 @@ impl Repository {
 
     fn open_preindexed_connection(&mut self, source_index: usize) -> Result<Connection> {
         let source = self.source_clone(source_index);
-        let index_path = preindexed_index_path(&source);
+        let index_path = preindexed_index_path(&self.app_root, &source);
         if !index_path.exists() {
             let _ = self.update_preindexed(source_index)?;
-            save_store(&self.store)?;
+            self.save_store()?;
         }
 
         self.open_sqlite_connection(index_path)
@@ -1183,7 +1235,7 @@ impl Repository {
 
     fn update_preindexed(&mut self, source_index: usize) -> Result<String> {
         let source = &mut self.store.sources[source_index];
-        let state_dir = source_state_dir(source);
+        let state_dir = source_state_dir(&self.app_root, source);
         fs::create_dir_all(&state_dir).context("failed to create source state directory")?;
 
         let mut last_error = None;
@@ -1203,9 +1255,9 @@ impl Repository {
                     let index_bytes = extract_zip_member(&payload, "Public/index.db")
                         .context("preindexed package did not contain Public/index.db")?;
 
-                    fs::write(preindexed_package_path(source), &payload)
+                    fs::write(preindexed_package_path(&self.app_root, source), &payload)
                         .context("failed to persist source package")?;
-                    fs::write(preindexed_index_path(source), index_bytes)
+                    fs::write(preindexed_index_path(&self.app_root, source), index_bytes)
                         .context("failed to persist source index")?;
                     source.last_update = Some(Utc::now());
                     source.source_version = header_version;
@@ -1241,7 +1293,7 @@ impl Repository {
 
     fn load_rest_information(&mut self, source_index: usize) -> Result<RestInformation> {
         let source = self.source_clone(source_index);
-        let cache_path = rest_information_cache_path(&source);
+        let cache_path = rest_information_cache_path(&self.app_root, &source);
 
         if cache_path.exists() {
             let cache = serde_json::from_slice::<RestInfoCache>(
@@ -1287,7 +1339,7 @@ impl Repository {
                 expires_at: Utc::now() + Duration::seconds(max_age as i64),
                 value: info.clone(),
             };
-            write_json(rest_information_cache_path(&source), &cache)?;
+            write_json(rest_information_cache_path(&self.app_root, &source), &cache)?;
         }
 
         Ok(info)
@@ -1300,7 +1352,7 @@ impl Repository {
         package_hash: &str,
     ) -> Result<(Vec<PackageVersionDataEntry>, PathBuf)> {
         let connection = self
-            .open_sqlite_connection(preindexed_index_path(source))
+            .open_sqlite_connection(preindexed_index_path(&self.app_root, source))
             .context("failed to reopen preindexed index for V2 version data")?;
         let package_hash = package_hash.to_ascii_lowercase();
         let package_id = query_optional_value(
@@ -2005,40 +2057,40 @@ fn looks_like_product_code(value: &str) -> bool {
     value.starts_with('{') && value.ends_with('}')
 }
 
-fn ensure_app_dirs() -> Result<()> {
-    fs::create_dir_all(app_root()?.join("sources"))
+fn ensure_app_dirs(app_root: &Path) -> Result<()> {
+    fs::create_dir_all(app_root.join("sources"))
         .context("failed to create app source directory")?;
     Ok(())
 }
 
-fn app_root() -> Result<PathBuf> {
+fn default_app_root() -> Result<PathBuf> {
     dirs::data_local_dir()
         .map(|path| path.join("winget-rs"))
         .ok_or_else(|| anyhow!("unable to determine LocalAppData path"))
 }
 
-fn store_path() -> Result<PathBuf> {
-    Ok(app_root()?.join("sources.json"))
+fn store_path(app_root: &Path) -> PathBuf {
+    app_root.join("sources.json")
 }
 
-fn source_state_dir(source: &SourceRecord) -> PathBuf {
-    app_root().expect("app root").join("sources").join(
+fn source_state_dir(app_root: &Path, source: &SourceRecord) -> PathBuf {
+    app_root.join("sources").join(
         source
             .name
             .replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_"),
     )
 }
 
-fn preindexed_package_path(source: &SourceRecord) -> PathBuf {
-    source_state_dir(source).join("source.msix")
+fn preindexed_package_path(app_root: &Path, source: &SourceRecord) -> PathBuf {
+    source_state_dir(app_root, source).join("source.msix")
 }
 
-fn preindexed_index_path(source: &SourceRecord) -> PathBuf {
-    source_state_dir(source).join("index.db")
+fn preindexed_index_path(app_root: &Path, source: &SourceRecord) -> PathBuf {
+    source_state_dir(app_root, source).join("index.db")
 }
 
-fn rest_information_cache_path(source: &SourceRecord) -> PathBuf {
-    source_state_dir(source).join("rest-information.json")
+fn rest_information_cache_path(app_root: &Path, source: &SourceRecord) -> PathBuf {
+    source_state_dir(app_root, source).join("rest-information.json")
 }
 
 fn rest_manifest_cache_path(
@@ -2066,11 +2118,11 @@ fn temp_cache_path(bucket: &str, identifier: &str) -> PathBuf {
         .join(identifier.replace(':', "_"))
 }
 
-fn load_store() -> Result<SourceStore> {
-    let path = store_path()?;
+fn load_store(app_root: &Path) -> Result<SourceStore> {
+    let path = store_path(app_root);
     if !path.exists() {
         let store = SourceStore::default();
-        save_store(&store)?;
+        save_store(app_root, &store)?;
         return Ok(store);
     }
 
@@ -2078,8 +2130,8 @@ fn load_store() -> Result<SourceStore> {
     serde_json::from_slice(&bytes).context("failed to parse source store")
 }
 
-fn save_store(store: &SourceStore) -> Result<()> {
-    write_json(store_path()?, store)
+fn save_store(app_root: &Path, store: &SourceStore) -> Result<()> {
+    write_json(store_path(app_root), store)
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
@@ -3742,10 +3794,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn pins_db_path() -> PathBuf {
+fn pins_db_path(app_root: &Path) -> PathBuf {
     // WinGet pins DB: %LOCALAPPDATA%\Microsoft\WinGet\pins.db
     // Our own pins: %LOCALAPPDATA%\winget-rs\pins.db
-    app_root().expect("app root").join("pins.db")
+    app_root.join("pins.db")
 }
 
 #[cfg(windows)]
@@ -3891,7 +3943,39 @@ mod tests {
     use flate2::Compression;
     use flate2::write::DeflateEncoder;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn repository_options_capture_custom_host_settings() {
+        let options = RepositoryOptions::new(PathBuf::from(r"C:\temp\winget-rs-test"))
+            .with_user_agent("winget-rs-tests/1.0");
+
+        assert_eq!(options.app_root, PathBuf::from(r"C:\temp\winget-rs-test"));
+        assert_eq!(options.user_agent, "winget-rs-tests/1.0");
+    }
+
+    #[test]
+    fn storage_paths_use_configured_app_root() {
+        let app_root = PathBuf::from(r"C:\temp\winget-rs-test");
+        let source = SourceRecord {
+            name: "winget/test".to_string(),
+            kind: SourceKind::PreIndexed,
+            arg: "https://example.com/cache".to_string(),
+            identifier: "Test.Source".to_string(),
+            last_update: None,
+            source_version: None,
+        };
+
+        assert_eq!(store_path(&app_root), app_root.join("sources.json"));
+        assert_eq!(
+            source_state_dir(&app_root, &source),
+            app_root.join("sources").join("winget_test")
+        );
+        assert_eq!(
+            pins_db_path(&app_root),
+            app_root.join("pins.db")
+        );
+    }
 
     #[test]
     fn parses_fixture_manifest() {

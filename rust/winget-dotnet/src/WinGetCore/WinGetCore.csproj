@@ -4,6 +4,11 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <PackageId>WinGetCore</PackageId>
+    <Description>Pure C# WinGet core library that works directly with source caches, REST endpoints, and installed package state without COM.</Description>
   </PropertyGroup>
 
   <ItemGroup>

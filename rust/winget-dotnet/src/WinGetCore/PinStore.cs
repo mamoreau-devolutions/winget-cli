@@ -4,9 +4,9 @@ namespace WinGetCore;
 
 internal static class PinStore
 {
-    public static List<PinRecord> List()
+    public static List<PinRecord> List(string? appRoot = null)
     {
-        var dbPath = SourceStoreManager.PinsDbPath();
+        var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         if (!File.Exists(dbPath)) return [];
 
         using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
@@ -35,9 +35,10 @@ internal static class PinStore
         return pins;
     }
 
-    public static void Add(string packageId, string version, string sourceId, PinType pinType)
+    public static void Add(string packageId, string version, string sourceId, PinType pinType, string? appRoot = null)
     {
-        var dbPath = SourceStoreManager.PinsDbPath();
+        SourceStoreManager.EnsureAppDirs(appRoot);
+        var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
 
@@ -68,9 +69,9 @@ internal static class PinStore
         cmd.ExecuteNonQuery();
     }
 
-    public static bool Remove(string packageId)
+    public static bool Remove(string packageId, string? appRoot = null)
     {
-        var dbPath = SourceStoreManager.PinsDbPath();
+        var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         if (!File.Exists(dbPath)) return false;
 
         using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -82,9 +83,10 @@ internal static class PinStore
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    public static void Reset()
+    public static void Reset(string? appRoot = null)
     {
-        var dbPath = SourceStoreManager.PinsDbPath();
+        var dbPath = SourceStoreManager.PinsDbPath(appRoot);
+        SqliteConnection.ClearAllPools();
         if (File.Exists(dbPath))
             File.Delete(dbPath);
     }

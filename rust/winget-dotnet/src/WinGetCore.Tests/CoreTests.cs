@@ -31,6 +31,32 @@ public class SourceStoreTests
         Assert.Contains(store.Sources, s => s.Name == "winget");
         Assert.Contains(store.Sources, s => s.Name == "msstore");
     }
+
+    [Fact]
+    public void RepositoryOpen_UsesCustomAppRoot()
+    {
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            using var repo = Repository.Open(new RepositoryOptions
+            {
+                AppRoot = appRoot,
+                UserAgent = "winget-dotnet-tests/1.0",
+            });
+
+            repo.AddSource("test", "https://example.com/test", SourceKind.Rest);
+
+            Assert.Equal(Path.GetFullPath(appRoot), repo.AppRoot);
+            Assert.True(File.Exists(Path.Combine(appRoot, "sources.json")));
+
+            var store = SourceStoreManager.Load(appRoot);
+            Assert.Contains(store.Sources, s => s.Name == "test");
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
 }
 
 public class ModelsTests
@@ -86,20 +112,25 @@ public class PinStoreTests
     [Fact]
     public void AddListRemove_RoundTrips()
     {
-        PinStore.Add("Test.Package.Unit", "1.0.0", "winget", PinType.Pinning);
+        var appRoot = TestPaths.CreateTempAppRoot();
         try
         {
-            var pins = PinStore.List();
+            PinStore.Add("Test.Package.Unit", "1.0.0", "winget", PinType.Pinning, appRoot);
+
+            var pins = PinStore.List(appRoot);
             Assert.Contains(pins, p => p.PackageId == "Test.Package.Unit");
             var pin = pins.First(p => p.PackageId == "Test.Package.Unit");
             Assert.Equal("1.0.0", pin.Version);
             Assert.Equal(PinType.Pinning, pin.PinType);
+
+            PinStore.Remove("Test.Package.Unit", appRoot);
+            Assert.DoesNotContain(PinStore.List(appRoot), p => p.PackageId == "Test.Package.Unit");
         }
         finally
         {
-            PinStore.Remove("Test.Package.Unit");
+            PinStore.Reset(appRoot);
+            TestPaths.DeleteAppRoot(appRoot);
         }
-        Assert.DoesNotContain(PinStore.List(), p => p.PackageId == "Test.Package.Unit");
     }
 }
 
@@ -150,5 +181,17 @@ public class RepositoryParityTests
 
         Assert.NotNull(selected);
         Assert.Equal("en-GB", selected!.Locale);
+    }
+}
+
+file static class TestPaths
+{
+    public static string CreateTempAppRoot() =>
+        Path.Combine(Path.GetTempPath(), "winget-dotnet-tests", Guid.NewGuid().ToString("N"));
+
+    public static void DeleteAppRoot(string appRoot)
+    {
+        if (Directory.Exists(appRoot))
+            Directory.Delete(appRoot, recursive: true);
     }
 }

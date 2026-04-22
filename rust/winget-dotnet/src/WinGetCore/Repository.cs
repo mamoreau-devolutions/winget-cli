@@ -9,25 +9,33 @@ namespace WinGetCore;
 
 public class Repository : IDisposable
 {
+    private readonly string _appRoot;
     private readonly HttpClient _client;
     private SourceStore _store;
 
-    private Repository(HttpClient client, SourceStore store)
+    private Repository(string appRoot, HttpClient client, SourceStore store)
     {
+        _appRoot = appRoot;
         _client = client;
         _store = store;
     }
 
-    public static Repository Open()
+    /// <summary>
+    /// Opens the repository using either the default CLI storage root or the caller-supplied library options.
+    /// </summary>
+    public static Repository Open(RepositoryOptions? options = null)
     {
-        SourceStoreManager.EnsureAppDirs();
-        var store = SourceStoreManager.Load();
+        options ??= new RepositoryOptions();
+        var appRoot = SourceStoreManager.NormalizeAppRoot(options.AppRoot);
+        SourceStoreManager.EnsureAppDirs(appRoot);
+        var store = SourceStoreManager.Load(appRoot);
         var client = new HttpClient();
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("winget-dotnet/0.1");
-        return new Repository(client, store);
+        client.DefaultRequestHeaders.UserAgent.ParseAdd(options.UserAgent);
+        return new Repository(appRoot, client, store);
     }
 
     public void Dispose() => _client.Dispose();
+    public string AppRoot => _appRoot;
 
     // ── Source management ──
 
@@ -47,7 +55,7 @@ public class Repository : IDisposable
             Arg = arg,
             Identifier = name,
         });
-        SourceStoreManager.Save(_store);
+        SourceStoreManager.Save(_store, _appRoot);
     }
 
     public void RemoveSource(string name)
@@ -56,22 +64,22 @@ public class Repository : IDisposable
             ?? throw new InvalidOperationException($"Source '{name}' not found.");
 
         _store.Sources.Remove(source);
-        var stateDir = SourceStoreManager.SourceStateDir(source);
+        var stateDir = SourceStoreManager.SourceStateDir(source, _appRoot);
         if (Directory.Exists(stateDir))
             Directory.Delete(stateDir, recursive: true);
-        SourceStoreManager.Save(_store);
+        SourceStoreManager.Save(_store, _appRoot);
     }
 
     public void ResetSources()
     {
         foreach (var source in _store.Sources)
         {
-            var stateDir = SourceStoreManager.SourceStateDir(source);
+            var stateDir = SourceStoreManager.SourceStateDir(source, _appRoot);
             if (Directory.Exists(stateDir))
                 Directory.Delete(stateDir, recursive: true);
         }
         _store = SourceStore.Default();
-        SourceStoreManager.Save(_store);
+        SourceStoreManager.Save(_store, _appRoot);
     }
 
     public List<SourceUpdateResult> UpdateSources(string? sourceName = null)
@@ -84,15 +92,15 @@ public class Repository : IDisposable
             var source = _store.Sources[index];
             var detail = source.Kind switch
             {
-                SourceKind.PreIndexed => PreIndexedSource.Update(_client, source),
-                SourceKind.Rest => RestSource.UpdateRest(_client, source),
+                SourceKind.PreIndexed => PreIndexedSource.Update(_client, source, _appRoot),
+                SourceKind.Rest => RestSource.UpdateRest(_client, source, _appRoot),
                 _ => "Unknown source kind"
             };
             source.LastUpdate = DateTime.UtcNow;
             results.Add(new SourceUpdateResult { Name = source.Name, Kind = source.Kind, Detail = detail });
         }
 
-        SourceStoreManager.Save(_store);
+        SourceStoreManager.Save(_store, _appRoot);
         return results;
     }
 
@@ -205,11 +213,11 @@ public class Repository : IDisposable
 
     // ── Pin management ──
 
-    public List<PinRecord> ListPins() => PinStore.List();
+    public List<PinRecord> ListPins() => PinStore.List(_appRoot);
     public void AddPin(string packageId, string version, string sourceId, PinType pinType)
-        => PinStore.Add(packageId, version, sourceId, pinType);
-    public bool RemovePin(string packageId) => PinStore.Remove(packageId);
-    public void ResetPins() => PinStore.Reset();
+        => PinStore.Add(packageId, version, sourceId, pinType, _appRoot);
+    public bool RemovePin(string packageId) => PinStore.Remove(packageId, _appRoot);
+    public void ResetPins() => PinStore.Reset(_appRoot);
 
     // ── Install / Uninstall ──
 
@@ -386,7 +394,7 @@ public class Repository : IDisposable
         int sourceIndex, PackageQuery query, SearchSemantics semantics)
     {
         var source = _store.Sources[sourceIndex];
-        var info = RestSource.LoadInformation(_client, source);
+        var info = RestSource.LoadInformation(_client, source, _appRoot);
 
         var (results, truncated) = RestSource.Search(_client, source, query, info, semantics);
         return (results.Select(r => new LocatedMatch
@@ -407,12 +415,12 @@ public class Repository : IDisposable
     private SqliteConnection OpenPreindexedConnection(int sourceIndex)
     {
         var source = _store.Sources[sourceIndex];
-        var indexPath = PreIndexedSource.IndexPath(source);
+        var indexPath = PreIndexedSource.IndexPath(source, _appRoot);
         if (!File.Exists(indexPath))
         {
-            PreIndexedSource.Update(_client, source);
+            PreIndexedSource.Update(_client, source, _appRoot);
             source.LastUpdate = DateTime.UtcNow;
-            SourceStoreManager.Save(_store);
+            SourceStoreManager.Save(_store, _appRoot);
         }
 
         var conn = new SqliteConnection($"Data Source={indexPath};Mode=ReadOnly");
@@ -466,7 +474,7 @@ public class Repository : IDisposable
     {
         var source = _store.Sources[sourceIndex];
         var conn = OpenPreindexedConnection(sourceIndex);
-        var (entries, _) = PreIndexedSource.LoadV2VersionData(_client, conn, source, packageRowid, packageHash);
+        var (entries, _) = PreIndexedSource.LoadV2VersionData(_client, conn, source, packageRowid, packageHash, _appRoot);
         return entries.Select(e => new VersionKey { Version = e.Version, Channel = "" }).ToList();
     }
 
@@ -498,7 +506,7 @@ public class Repository : IDisposable
     {
         var source = _store.Sources[sourceIndex];
         var conn = OpenPreindexedConnection(sourceIndex);
-        var (entries, vdFile) = PreIndexedSource.LoadV2VersionData(_client, conn, source, packageRowid, packageHash);
+        var (entries, vdFile) = PreIndexedSource.LoadV2VersionData(_client, conn, source, packageRowid, packageHash, _appRoot);
         var selected = SelectV2Version(entries, query.Version);
         var bytes = PreIndexedSource.GetCachedSourceFile(_client, "V2_M", source, selected.ManifestRelativePath, selected.ManifestHash);
         var manifest = ParseYamlManifest(bytes);
@@ -509,7 +517,7 @@ public class Repository : IDisposable
     private (Manifest, List<string>) ManifestFromRest(int sourceIndex, string packageId, List<VersionKey> versions, PackageQuery query)
     {
         var source = _store.Sources[sourceIndex];
-        var info = RestSource.LoadInformation(_client, source);
+        var info = RestSource.LoadInformation(_client, source, _appRoot);
         var selected = SelectRestVersion(versions, query.Version, query.Channel);
         var manifest = RestSource.FetchManifest(_client, source, info, packageId, selected.Version, selected.Channel);
         return (manifest, []);
