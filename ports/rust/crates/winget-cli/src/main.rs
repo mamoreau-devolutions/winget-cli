@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
 use winget_core::{
-    CacheWarmResult, Documentation, InstallResult, ListQuery, ListResponse, PackageQuery, PinType,
-    Repository, SearchResponse, ShowResult, SourceKind, SourceRecord, SourceUpdateResult,
-    VersionsResult,
+    CacheWarmResult, Documentation, InstallRequest, InstallResult, InstallerMode, ListQuery,
+    ListResponse, PackageQuery, PinType, Repository, SearchResponse, ShowResult, SourceKind,
+    SourceRecord, SourceUpdateResult, UninstallRequest, VersionsResult,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -211,9 +212,31 @@ struct PinAddArgs {
 struct InstallArgs {
     #[command(flatten)]
     query: QueryArgs,
-    #[arg(long)]
+    #[arg(long = "manifest")]
+    manifest: Option<PathBuf>,
+    #[arg(long = "log")]
+    log: Option<PathBuf>,
+    #[arg(long = "custom")]
+    custom: Option<String>,
+    #[arg(long = "override")]
+    override_args: Option<String>,
+    #[arg(long = "location")]
+    location: Option<String>,
+    #[arg(long = "skip-dependencies")]
+    skip_dependencies: bool,
+    #[arg(long = "dependencies")]
+    dependencies_only: bool,
+    #[arg(long = "accept-package-agreements")]
+    accept_package_agreements: bool,
+    #[arg(long = "force")]
+    force: bool,
+    #[arg(long = "rename")]
+    rename: Option<String>,
+    #[arg(long = "uninstall-previous")]
+    uninstall_previous: bool,
+    #[arg(long, conflicts_with = "interactive")]
     silent: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "silent")]
     interactive: bool,
 }
 
@@ -221,8 +244,24 @@ struct InstallArgs {
 struct UninstallArgs {
     #[command(flatten)]
     query: QueryArgs,
+    #[arg(long = "manifest")]
+    manifest: Option<PathBuf>,
+    #[arg(long = "product-code")]
+    product_code: Option<String>,
+    #[arg(long = "all-versions")]
+    all_versions: bool,
+    #[arg(long, conflicts_with = "silent")]
+    interactive: bool,
     #[arg(long)]
     silent: bool,
+    #[arg(long = "force")]
+    force: bool,
+    #[arg(long = "purge")]
+    purge: bool,
+    #[arg(long = "preserve")]
+    preserve: bool,
+    #[arg(long = "log")]
+    log: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -586,14 +625,50 @@ fn run() -> Result<()> {
         }
         Commands::Install(args) => {
             let mut repository = Repository::open()?;
-            let silent = args.silent;
-            let result = repository.install(&args.query.into(), silent)?;
+            let mode = if args.interactive {
+                InstallerMode::Interactive
+            } else if args.silent {
+                InstallerMode::Silent
+            } else {
+                InstallerMode::SilentWithProgress
+            };
+            let result = repository.install_request(&InstallRequest {
+                query: args.query.into(),
+                manifest_path: args.manifest,
+                mode,
+                log_path: args.log,
+                custom: args.custom,
+                override_args: args.override_args,
+                install_location: args.location,
+                skip_dependencies: args.skip_dependencies,
+                dependencies_only: args.dependencies_only,
+                accept_package_agreements: args.accept_package_agreements,
+                force: args.force,
+                rename: args.rename,
+                uninstall_previous: args.uninstall_previous,
+            })?;
             print_install_result(&result);
         }
         Commands::Uninstall(args) => {
             let mut repository = Repository::open()?;
-            let silent = args.silent;
-            let result = repository.uninstall(&args.query.into(), silent)?;
+            let mode = if args.interactive {
+                InstallerMode::Interactive
+            } else if args.silent {
+                InstallerMode::Silent
+            } else {
+                InstallerMode::SilentWithProgress
+            };
+            let result = repository.uninstall_request(&UninstallRequest {
+                query: args.query.into(),
+                manifest_path: args.manifest,
+                product_code: args.product_code,
+                mode,
+                all_versions: args.all_versions,
+                force: args.force,
+                purge: args.purge,
+                preserve: args.preserve,
+                log_path: args.log,
+            })?;
             print_install_result(&result);
         }
         Commands::Import(args) => {
@@ -667,6 +742,8 @@ impl From<ListArgs> for ListQuery {
             moniker: value.moniker,
             tag: value.tag,
             command: value.command,
+            product_code: None,
+            version: None,
             source: value.source,
             count: value.count,
             exact: value.exact,
@@ -687,6 +764,8 @@ impl From<UpgradeArgs> for ListQuery {
             moniker: value.moniker,
             tag: None,
             command: None,
+            product_code: None,
+            version: None,
             source: value.source,
             count: value.count,
             exact: value.exact,
@@ -1150,6 +1229,8 @@ fn do_export(repository: &mut Repository, args: &ExportArgs) -> Result<()> {
         moniker: None,
         tag: None,
         command: None,
+        product_code: None,
+        version: None,
         source: args.source.clone(),
         count: None,
         exact: false,

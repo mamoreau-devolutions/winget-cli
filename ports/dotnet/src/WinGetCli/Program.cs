@@ -223,6 +223,7 @@ upgradeCommand.SetHandler((ctx) =>
                 Console.WriteLine($"Upgrading {m.Id} from {m.InstalledVersion} to {m.AvailableVersion ?? "?"} ...");
                 try
                 {
+                    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
                     var installQuery = new PackageQuery { Id = m.Id, Source = m.SourceName };
                     var r = repo.Install(installQuery, silent);
                     Console.WriteLine(r.Success ? $"  Successfully upgraded {m.Id}" : $"  Failed to upgrade {m.Id} (exit code: {r.ExitCode})");
@@ -518,12 +519,28 @@ pinResetCmd.SetHandler((force) =>
 // ── Install ──
 var installCommand = new Command("install", "Install a package");
 var iArg = new Argument<string?>("query", () => null, "Package query");
-var iqOpt = QueryArg(); var iidOpt = IdOpt(); var inameOpt = NameOpt(); var isrcOpt = SourceOpt();
+var iqOpt = QueryArg(); var iidOpt = IdOpt(); var inameOpt = NameOpt(); var imonikerOpt = MonikerOpt(); var isrcOpt = SourceOpt();
 var ieOpt = ExactOpt(); var ivOpt = VersionOpt();
+var ichannelOpt = new Option<string?>("--channel", "Channel");
+var ilocaleOpt = new Option<string?>("--locale", "Installer locale");
+var itypeOpt = new Option<string?>("--installer-type", "Installer type");
+var iarchOpt = new Option<string?>("--architecture", "Architecture"); iarchOpt.AddAlias("-a");
+var iscopeOpt = new Option<string?>("--scope", "Install scope");
+var imanifestOpt = new Option<string?>("--manifest", "Local manifest file or directory");
+var ilogOpt = new Option<string?>("--log", "Installer log path");
+var icustomOpt = new Option<string?>("--custom", "Additional installer switches");
+var ioverrideOpt = new Option<string?>("--override", "Override installer arguments");
+var ilocationOpt = new Option<string?>("--location", "Install location");
+var iskipDepsOpt = new Option<bool>("--skip-dependencies", "Skip package dependencies");
+var idepsOnlyOpt = new Option<bool>("--dependencies", "Install dependencies only");
+var iacceptPkgAgreementsOpt = new Option<bool>("--accept-package-agreements", "Accept package agreements");
+var iforceOpt = new Option<bool>("--force", "Force install behavior");
+var irenameOpt = new Option<string?>("--rename", "Rename the installer or target payload");
+var iuninstallPreviousOpt = new Option<bool>("--uninstall-previous", "Uninstall previous versions before installing");
 var iSilentOpt = new Option<bool>("--silent", "Silent install");
 var iInteractiveOpt = new Option<bool>("--interactive", "Interactive install");
 installCommand.AddArgument(iArg);
-foreach (var o in new Option[] { iqOpt, iidOpt, inameOpt, isrcOpt, ieOpt, ivOpt, iSilentOpt, iInteractiveOpt }) installCommand.AddOption(o);
+foreach (var o in new Option[] { iqOpt, iidOpt, inameOpt, imonikerOpt, isrcOpt, ieOpt, ivOpt, ichannelOpt, ilocaleOpt, itypeOpt, iarchOpt, iscopeOpt, imanifestOpt, ilogOpt, icustomOpt, ioverrideOpt, ilocationOpt, iskipDepsOpt, idepsOnlyOpt, iacceptPkgAgreementsOpt, iforceOpt, irenameOpt, iuninstallPreviousOpt, iSilentOpt, iInteractiveOpt }) installCommand.AddOption(o);
 
 installCommand.SetHandler((ctx) =>
 {
@@ -532,36 +549,95 @@ installCommand.SetHandler((ctx) =>
         Query = ctx.ParseResult.GetValueForArgument(iArg) ?? ctx.ParseResult.GetValueForOption(iqOpt),
         Id = ctx.ParseResult.GetValueForOption(iidOpt),
         Name = ctx.ParseResult.GetValueForOption(inameOpt),
+        Moniker = ctx.ParseResult.GetValueForOption(imonikerOpt),
         Source = ctx.ParseResult.GetValueForOption(isrcOpt),
         Exact = ctx.ParseResult.GetValueForOption(ieOpt),
         Version = ctx.ParseResult.GetValueForOption(ivOpt),
+        Channel = ctx.ParseResult.GetValueForOption(ichannelOpt),
+        Locale = ctx.ParseResult.GetValueForOption(ilocaleOpt),
+        InstallerType = ctx.ParseResult.GetValueForOption(itypeOpt),
+        InstallerArchitecture = ctx.ParseResult.GetValueForOption(iarchOpt),
+        InstallScope = ctx.ParseResult.GetValueForOption(iscopeOpt),
     };
     var silent = ctx.ParseResult.GetValueForOption(iSilentOpt);
+    var interactive = ctx.ParseResult.GetValueForOption(iInteractiveOpt);
+    if (silent && interactive)
+        throw new InvalidOperationException("--silent and --interactive cannot be used together.");
+    if (!OperatingSystem.IsWindows())
+        throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
     using var repo = Repository.Open();
-    var result = repo.Install(query, silent);
-    PrintInstallResult(result);
+    var mode = interactive ? InstallerMode.Interactive : silent ? InstallerMode.Silent : InstallerMode.SilentWithProgress;
+    var result = repo.Install(new InstallRequest
+    {
+        Query = query,
+        ManifestPath = ctx.ParseResult.GetValueForOption(imanifestOpt),
+        Mode = mode,
+        LogPath = ctx.ParseResult.GetValueForOption(ilogOpt),
+        Custom = ctx.ParseResult.GetValueForOption(icustomOpt),
+        Override = ctx.ParseResult.GetValueForOption(ioverrideOpt),
+        InstallLocation = ctx.ParseResult.GetValueForOption(ilocationOpt),
+        SkipDependencies = ctx.ParseResult.GetValueForOption(iskipDepsOpt),
+        DependenciesOnly = ctx.ParseResult.GetValueForOption(idepsOnlyOpt),
+        AcceptPackageAgreements = ctx.ParseResult.GetValueForOption(iacceptPkgAgreementsOpt),
+        Force = ctx.ParseResult.GetValueForOption(iforceOpt),
+        Rename = ctx.ParseResult.GetValueForOption(irenameOpt),
+        UninstallPrevious = ctx.ParseResult.GetValueForOption(iuninstallPreviousOpt),
+    });
+    PrintPackageActionResult(result, "install", "installed");
 });
 
 // ── Uninstall ──
 var uninstallCommand = new Command("uninstall", "Uninstall a package");
 var uiArg = new Argument<string?>("query", () => null, "Package query");
-var uiqOpt = QueryArg(); var uiidOpt = IdOpt(); var uisOpt = SourceOpt();
+var uiqOpt = QueryArg(); var uiidOpt = IdOpt(); var uinameOpt = NameOpt(); var uimonikerOpt = MonikerOpt(); var uisOpt = SourceOpt();
+var uieOpt = ExactOpt(); var uivOpt = VersionOpt();
+var uiscopeOpt = new Option<string?>("--scope", "Install scope");
+var uimanifestOpt = new Option<string?>("--manifest", "Local manifest file or directory");
+var uiproductCodeOpt = new Option<string?>("--product-code", "Installed product code");
+var uiallVersionsOpt = new Option<bool>("--all-versions", "Uninstall all matching versions");
+var uiInteractiveOpt = new Option<bool>("--interactive", "Interactive uninstall");
+var uiForceOpt = new Option<bool>("--force", "Force uninstall behavior");
+var uiPurgeOpt = new Option<bool>("--purge", "Purge portable package contents");
+var uiPreserveOpt = new Option<bool>("--preserve", "Preserve portable package contents");
+var uiLogOpt = new Option<string?>("--log", "Uninstaller log path");
 var uiSilentOpt = new Option<bool>("--silent", "Silent uninstall");
 uninstallCommand.AddArgument(uiArg);
-foreach (var o in new Option[] { uiqOpt, uiidOpt, uisOpt, uiSilentOpt }) uninstallCommand.AddOption(o);
+foreach (var o in new Option[] { uiqOpt, uiidOpt, uinameOpt, uimonikerOpt, uisOpt, uieOpt, uivOpt, uiscopeOpt, uimanifestOpt, uiproductCodeOpt, uiallVersionsOpt, uiInteractiveOpt, uiForceOpt, uiPurgeOpt, uiPreserveOpt, uiLogOpt, uiSilentOpt }) uninstallCommand.AddOption(o);
 
 uninstallCommand.SetHandler((ctx) =>
 {
+    if (!OperatingSystem.IsWindows())
+        throw new PlatformNotSupportedException("Uninstalling packages is only supported on Windows");
+
     var query = new PackageQuery
     {
         Query = ctx.ParseResult.GetValueForArgument(uiArg) ?? ctx.ParseResult.GetValueForOption(uiqOpt),
         Id = ctx.ParseResult.GetValueForOption(uiidOpt),
+        Name = ctx.ParseResult.GetValueForOption(uinameOpt),
+        Moniker = ctx.ParseResult.GetValueForOption(uimonikerOpt),
         Source = ctx.ParseResult.GetValueForOption(uisOpt),
+        Exact = ctx.ParseResult.GetValueForOption(uieOpt),
+        Version = ctx.ParseResult.GetValueForOption(uivOpt),
+        InstallScope = ctx.ParseResult.GetValueForOption(uiscopeOpt),
     };
     var silent = ctx.ParseResult.GetValueForOption(uiSilentOpt);
+    var interactive = ctx.ParseResult.GetValueForOption(uiInteractiveOpt);
+    if (silent && interactive)
+        throw new InvalidOperationException("--silent and --interactive cannot be used together.");
     using var repo = Repository.Open();
-    var result = repo.Uninstall(query, silent);
-    PrintInstallResult(result);
+    var result = repo.Uninstall(new UninstallRequest
+    {
+        Query = query,
+        ManifestPath = ctx.ParseResult.GetValueForOption(uimanifestOpt),
+        ProductCode = ctx.ParseResult.GetValueForOption(uiproductCodeOpt),
+        Mode = interactive ? InstallerMode.Interactive : silent ? InstallerMode.Silent : InstallerMode.SilentWithProgress,
+        AllVersions = ctx.ParseResult.GetValueForOption(uiallVersionsOpt),
+        Force = ctx.ParseResult.GetValueForOption(uiForceOpt),
+        Purge = ctx.ParseResult.GetValueForOption(uiPurgeOpt),
+        Preserve = ctx.ParseResult.GetValueForOption(uiPreserveOpt),
+        LogPath = ctx.ParseResult.GetValueForOption(uiLogOpt),
+    });
+    PrintPackageActionResult(result, "uninstall", "uninstalled");
 });
 
 // ── Import ──
@@ -593,6 +669,7 @@ importCommand.SetHandler((file, dryRun) =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
                     Console.Write($"Installing {pkgId}...");
                     var result = repo.Install(new PackageQuery { Id = pkgId }, false);
                     Console.WriteLine(result.Success ? " done" : $" failed (exit {result.ExitCode})");
@@ -822,12 +899,12 @@ static void PrintSources(List<SourceRecord> sources)
         Console.WriteLine($"{s.Name,-12} {s.Arg,-60} false");
 }
 
-static void PrintInstallResult(InstallResult result)
+static void PrintPackageActionResult(InstallResult result, string action, string actionPastTense)
 {
     if (result.Success)
-        Console.WriteLine($"Successfully installed {result.PackageId} v{result.Version}");
+        Console.WriteLine($"Successfully {actionPastTense} {result.PackageId} v{result.Version}");
     else
-        Console.Error.WriteLine($"Failed to install {result.PackageId} v{result.Version} (exit code: {result.ExitCode})");
+        Console.Error.WriteLine($"Failed to {action} {result.PackageId} v{result.Version} (exit code: {result.ExitCode})");
 }
 
 static void PrintErrorLookup(string input)

@@ -86,6 +86,7 @@ public class ModelsTests
         Assert.Null(installer.Url);
         Assert.Null(installer.Scope);
         Assert.Null(installer.ProductCode);
+        Assert.True(installer.Switches.IsEmpty());
         Assert.Empty(installer.Commands);
         Assert.Empty(installer.PackageDependencies);
     }
@@ -143,6 +144,7 @@ public class ModelsTests
                         Sha256 = "ABC123",
                         Locale = "en-US",
                         Scope = "machine",
+                        Switches = new InstallerSwitches { Silent = "/quiet" },
                         Commands = ["testpkg"],
                         PackageDependencies = ["Microsoft.UI.Xaml.2.8"],
                     }
@@ -156,6 +158,7 @@ public class ModelsTests
                 Sha256 = "ABC123",
                 Locale = "en-US",
                 Scope = "machine",
+                Switches = new InstallerSwitches { Silent = "/quiet" },
                 Commands = ["testpkg"],
                 PackageDependencies = ["Microsoft.UI.Xaml.2.8"],
             },
@@ -179,8 +182,37 @@ public class ModelsTests
 
         var commands = Assert.IsType<List<string>>(selectedInstaller["Commands"]);
         Assert.Equal("testpkg", commands[0]);
+        var switches = Assert.IsType<Dictionary<string, object?>>(selectedInstaller["InstallerSwitches"]);
+        Assert.Equal("/quiet", switches["Silent"]);
         Assert.Equal(@"C:\temp\cache\Test.Package.yaml", cachedFiles[0]);
         Assert.Equal("cache warmed", warnings[0]);
+    }
+
+    [Fact]
+    public void ParseYamlManifest_ReadsInstallerSwitches()
+    {
+        var yaml = """
+            PackageIdentifier: Test.Package
+            PackageVersion: 1.2.3
+            PackageName: Test Package
+            InstallerSwitches:
+              SilentWithProgress: /SILENT
+            Installers:
+              - Architecture: x64
+                InstallerType: inno
+                InstallerUrl: https://example.test/Test.Package.exe
+                InstallerSha256: ABC123
+                InstallerSwitches:
+                  Silent: /VERYSILENT
+                  Interactive: /HELP
+            """;
+
+        var manifest = Repository.ParseYamlManifest(System.Text.Encoding.UTF8.GetBytes(yaml));
+        var installer = Assert.Single(manifest.Installers);
+
+        Assert.Equal("/SILENT", installer.Switches.SilentWithProgress);
+        Assert.Equal("/VERYSILENT", installer.Switches.Silent);
+        Assert.Equal("/HELP", installer.Switches.Interactive);
     }
 }
 
@@ -214,6 +246,116 @@ public class PinStoreTests
 public class RepositoryParityTests
 {
     [Fact]
+    public void BuildArguments_UsesManifestSwitchesByMode()
+    {
+        var installer = new Installer
+        {
+            InstallerType = "inno",
+            Switches = new InstallerSwitches
+            {
+                Silent = "/mysilent",
+                SilentWithProgress = "/mysilentwithprogress",
+                Interactive = "/myinteractive"
+            }
+        };
+
+        Assert.Equal(["/mysilent"], InstallerDispatch.BuildArguments("inno", InstallerMode.Silent, installer));
+        Assert.Equal(["/mysilentwithprogress"], InstallerDispatch.BuildArguments("inno", InstallerMode.SilentWithProgress, installer));
+        Assert.Equal(["/myinteractive"], InstallerDispatch.BuildArguments("inno", InstallerMode.Interactive, installer));
+    }
+
+    [Fact]
+    public void BuildArguments_UsesInnoDefaultsWhenManifestOmitsSwitches()
+    {
+        var installer = new Installer { InstallerType = "inno" };
+
+        Assert.Equal(["/SP-", "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], InstallerDispatch.BuildArguments("inno", InstallerMode.SilentWithProgress, installer));
+        Assert.Equal(["/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], InstallerDispatch.BuildArguments("inno", InstallerMode.Silent, installer));
+    }
+
+    [Fact]
+    public void BuildArguments_AppendsManifestAndCliSwitches()
+    {
+        var installer = new Installer
+        {
+            InstallerType = "msi",
+            Switches = new InstallerSwitches
+            {
+                Custom = "ADDLOCAL=Core",
+                Log = "/log \"<LOGPATH>\"",
+                InstallLocation = "TARGETDIR=\"<INSTALLPATH>\"",
+            }
+        };
+
+        var args = InstallerDispatch.BuildArguments(
+            "msi",
+            new InstallRequest
+            {
+                Query = new PackageQuery(),
+                Mode = InstallerMode.Silent,
+                LogPath = @"C:\temp\winget.log",
+                Custom = "REBOOT=ReallySuppress",
+                InstallLocation = @"C:\Apps\ShareX",
+            },
+            new Manifest { Id = "ShareX.ShareX", Name = "ShareX", Version = "19.0.2" },
+            installer,
+            @"C:\temp\ShareX.msi");
+
+        Assert.Equal(["/i", @"C:\temp\ShareX.msi", "/quiet", "/norestart", "/log", @"C:\temp\winget.log", "ADDLOCAL=Core", "REBOOT=ReallySuppress", @"TARGETDIR=C:\Apps\ShareX"], args);
+    }
+
+    [Fact]
+    public void BuildArguments_UsesOverrideInsteadOfSynthesizedArguments()
+    {
+        var installer = new Installer { InstallerType = "inno" };
+        var args = InstallerDispatch.BuildArguments(
+            "inno",
+            new InstallRequest
+            {
+                Query = new PackageQuery(),
+                Override = "/custom /args",
+            },
+            new Manifest { Id = "Test.Package", Name = "Test", Version = "1.0.0" },
+            installer);
+
+        Assert.Equal(["/custom", "/args"], args);
+    }
+
+    [Fact]
+    public void GetArpSubkeyName_ExtractsRegistrySubkey()
+    {
+        Assert.Equal("ShareX", InstallerDispatch.GetArpSubkeyName(@"ARP\Machine\X64\ShareX"));
+        Assert.Null(InstallerDispatch.GetArpSubkeyName(@"MSIX\ShareX_19.0.2_x64__name"));
+    }
+
+    [Fact]
+    public void RegistryEntryMatchesInstalledPackage_UsesLocalIdentityInsteadOfCorrelatedId()
+    {
+        var installed = new ListMatch
+        {
+            Name = "ShareX",
+            Id = "ShareX.ShareX",
+            LocalId = @"ARP\Machine\X64\ShareX",
+            InstalledVersion = "19.0.2",
+            ProductCodes = [],
+        };
+
+        Assert.True(InstallerDispatch.RegistryEntryMatchesInstalledPackage("ShareX", "ShareX", null, installed));
+        Assert.False(InstallerDispatch.RegistryEntryMatchesInstalledPackage("ShareX.ShareX", "ShareX.ShareX", null, installed));
+    }
+
+    [Fact]
+    public void BuildUninstallCommand_AppendsSilentSwitchOnlyWhenNeeded()
+    {
+        Assert.Equal("\"C:\\Program Files\\ShareX\\unins000.exe\" /S",
+            InstallerDispatch.BuildUninstallCommand("\"C:\\Program Files\\ShareX\\unins000.exe\"", silent: true, hasQuietUninstallCommand: false));
+        Assert.Equal("\"C:\\Program Files\\ShareX\\unins000.exe\" /VERYSILENT",
+            InstallerDispatch.BuildUninstallCommand("\"C:\\Program Files\\ShareX\\unins000.exe\" /VERYSILENT", silent: true, hasQuietUninstallCommand: false));
+        Assert.Equal("\"C:\\Program Files\\ShareX\\unins000.exe\"",
+            InstallerDispatch.BuildUninstallCommand("\"C:\\Program Files\\ShareX\\unins000.exe\"", silent: false, hasQuietUninstallCommand: false));
+    }
+
+    [Fact]
     public void SelectInstaller_PrefersRustStyleRanking()
     {
         var installers = new List<Installer>
@@ -224,6 +366,7 @@ public class RepositoryParityTests
                 InstallerType = "exe",
                 Scope = "user",
                 Locale = "en-US",
+                Switches = new InstallerSwitches(),
             },
             new()
             {
@@ -231,6 +374,7 @@ public class RepositoryParityTests
                 InstallerType = "exe",
                 Scope = "machine",
                 Locale = "en-US",
+                Switches = new InstallerSwitches(),
                 Commands = ["powertoys"],
             },
         };
@@ -246,8 +390,8 @@ public class RepositoryParityTests
     {
         var installers = new List<Installer>
         {
-            new() { Architecture = "x64", InstallerType = "exe", Locale = "fr-FR" },
-            new() { Architecture = "x64", InstallerType = "exe", Locale = "en-GB" },
+            new() { Architecture = "x64", InstallerType = "exe", Locale = "fr-FR", Switches = new InstallerSwitches() },
+            new() { Architecture = "x64", InstallerType = "exe", Locale = "en-GB", Switches = new InstallerSwitches() },
         };
 
         var selected = Repository.SelectInstaller(installers, new PackageQuery

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using YamlDotNet.Core;
@@ -222,15 +223,17 @@ public class Repository : IDisposable
     // ── Install / Uninstall ──
 
     public (Manifest Manifest, string InstallerPath) DownloadInstaller(PackageQuery query, string downloadDir)
+        => DownloadInstaller(new InstallRequest { Query = query }, downloadDir);
+
+    public (Manifest Manifest, string InstallerPath) DownloadInstaller(InstallRequest request, string downloadDir)
     {
-        var (located, _) = FindSingleMatch(query);
-        var (manifest, _) = ManifestForMatch(located, query);
-        var installer = SelectInstaller(manifest.Installers, query)
+        var manifest = ResolveManifestForInstall(request);
+        var installer = SelectInstaller(manifest.Installers, request.Query)
             ?? throw new InvalidOperationException("No applicable installer found for the current system");
         var url = installer.Url ?? throw new InvalidOperationException("Installer has no URL");
 
         Directory.CreateDirectory(downloadDir);
-        var filename = url.Split('/').Last().Split('?').First();
+        var filename = request.Rename ?? url.Split('/').Last().Split('?').First();
         if (string.IsNullOrEmpty(filename)) filename = "installer";
         var dest = Path.Combine(downloadDir, filename);
 
@@ -253,15 +256,71 @@ public class Repository : IDisposable
         return (manifest, dest);
     }
 
+    [SupportedOSPlatform("windows")]
     public InstallResult Install(PackageQuery query, bool silent)
     {
-        var tempDir = Path.Combine(Path.GetTempPath(), "winget-dotnet-install");
-        var (manifest, installerPath) = DownloadInstaller(query, tempDir);
-        var installer = SelectInstaller(manifest.Installers, query)
+        return Install(new InstallRequest
+        {
+            Query = query,
+            Mode = silent ? InstallerMode.Silent : InstallerMode.SilentWithProgress,
+        });
+    }
+
+    [SupportedOSPlatform("windows")]
+    public InstallResult Install(PackageQuery query, InstallerMode mode)
+        => Install(new InstallRequest { Query = query, Mode = mode });
+
+    [SupportedOSPlatform("windows")]
+    public InstallResult Install(InstallRequest request)
+    {
+        var manifest = ResolveManifestForInstall(request);
+        EnsurePackageAgreementsAccepted(manifest, request);
+        InstallDependencies(manifest, request);
+
+        if (request.DependenciesOnly)
+        {
+            return new InstallResult
+            {
+                PackageId = manifest.Id,
+                Version = manifest.Version,
+                InstallerPath = "",
+                InstallerType = "dependencies",
+                ExitCode = 0,
+                Success = true,
+            };
+        }
+
+        var selectedInstaller = SelectInstaller(manifest.Installers, request.Query)
             ?? throw new InvalidOperationException("No applicable installer found");
 
-        var installerType = (installer.InstallerType ?? "exe").ToLowerInvariant();
-        var exitCode = InstallerDispatch.Execute(installerPath, installerType, silent, installer);
+        if (request.UninstallPrevious)
+        {
+            var uninstallQuery = request.Query with
+            {
+                Id = request.Query.Id ?? manifest.Id,
+                Query = request.Query.Query ?? manifest.Id,
+            };
+            try
+            {
+                Uninstall(new UninstallRequest
+                {
+                    Query = uninstallQuery,
+                    ProductCode = selectedInstaller.ProductCode,
+                    Mode = InstallerMode.Silent,
+                    AllVersions = true,
+                    Force = true,
+                });
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "winget-dotnet-install");
+        var (_, installerPath) = DownloadInstaller(request, tempDir);
+
+        var installerType = (selectedInstaller.InstallerType ?? "exe").ToLowerInvariant();
+        var exitCode = InstallerDispatch.Execute(installerPath, installerType, request, manifest, selectedInstaller);
 
         return new InstallResult
         {
@@ -274,27 +333,152 @@ public class Repository : IDisposable
         };
     }
 
+    [SupportedOSPlatform("windows")]
     public InstallResult Uninstall(PackageQuery query, bool silent)
     {
-        var listQuery = new ListQuery
+        return Uninstall(new UninstallRequest
         {
-            Query = query.Query, Id = query.Id, Name = query.Name,
-            Moniker = query.Moniker, Source = query.Source, Count = 10,
-        };
-        var listResult = List(listQuery);
-        var installed = listResult.Matches.FirstOrDefault()
-            ?? throw new InvalidOperationException("No installed package found matching the query");
+            Query = query,
+            Mode = silent ? InstallerMode.Silent : InstallerMode.SilentWithProgress,
+        });
+    }
 
-        var exitCode = InstallerDispatch.Uninstall(installed.Id, silent);
+    [SupportedOSPlatform("windows")]
+    public InstallResult Uninstall(UninstallRequest request)
+    {
+        var matches = ResolveUninstallMatches(request);
+        var exitCode = 0;
+
+        foreach (var installed in matches)
+        {
+            exitCode = InstallerDispatch.Uninstall(installed, request);
+            if (exitCode != 0 && !request.AllVersions)
+                break;
+        }
+
+        var primary = matches[0];
         return new InstallResult
         {
-            PackageId = installed.Id,
-            Version = installed.InstalledVersion,
+            PackageId = primary.Id,
+            Version = primary.InstalledVersion,
             InstallerPath = "",
-            InstallerType = "uninstall",
+            InstallerType = primary.InstallerCategory ?? "uninstall",
             ExitCode = exitCode,
             Success = exitCode == 0,
         };
+    }
+
+    private Manifest ResolveManifestForInstall(InstallRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.ManifestPath))
+            return LoadManifestFromPath(request.ManifestPath!);
+
+        var (located, _) = FindSingleMatch(request.Query);
+        var (manifest, _) = ManifestForMatch(located, request.Query);
+        return manifest;
+    }
+
+    private static void EnsurePackageAgreementsAccepted(Manifest manifest, InstallRequest request)
+    {
+        if (!request.AcceptPackageAgreements && manifest.Agreements.Count > 0)
+            throw new InvalidOperationException("Package agreements are present; rerun with --accept-package-agreements to continue.");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private void InstallDependencies(Manifest manifest, InstallRequest request)
+    {
+        if (request.SkipDependencies)
+            return;
+
+        var dependencies = manifest.PackageDependencies
+            .Concat(manifest.Installers.SelectMany(installer => installer.PackageDependencies))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var dependencyId in dependencies)
+        {
+            Install(new InstallRequest
+            {
+                Query = new PackageQuery
+                {
+                    Id = dependencyId,
+                    Source = request.Query.Source,
+                    Exact = true,
+                },
+                Mode = request.Mode,
+                SkipDependencies = false,
+                DependenciesOnly = false,
+                AcceptPackageAgreements = request.AcceptPackageAgreements,
+                Force = request.Force,
+            });
+        }
+    }
+
+    private List<ListMatch> ResolveUninstallMatches(UninstallRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.ManifestPath))
+        {
+            var manifest = LoadManifestFromPath(request.ManifestPath!);
+            var manifestQuery = new PackageQuery
+            {
+                Query = manifest.Id,
+                Id = manifest.Id,
+                Name = manifest.Name,
+                Exact = true,
+                Version = request.Query.Version ?? manifest.Version,
+            };
+
+            request = request with
+            {
+                Query = manifestQuery,
+                ProductCode = request.ProductCode ?? manifest.Installers
+                    .Select(installer => installer.ProductCode)
+                    .FirstOrDefault(code => !string.IsNullOrWhiteSpace(code)),
+            };
+        }
+
+        var listQuery = new ListQuery
+        {
+            Query = request.Query.Query,
+            Id = request.Query.Id,
+            Name = request.Query.Name,
+            Moniker = request.Query.Moniker,
+            ProductCode = request.ProductCode,
+            Version = request.Query.Version,
+            Source = request.Query.Source,
+            Exact = request.Query.Exact,
+            InstallScope = request.Query.InstallScope,
+            Count = request.AllVersions ? null : 100,
+        };
+
+        var matches = List(listQuery).Matches;
+        if (matches.Count == 0)
+            throw new InvalidOperationException("No installed package found matching the query");
+        if (!request.AllVersions && matches.Count > 1 && !request.Force)
+            throw new InvalidOperationException("Multiple installed packages matched the query; refine the query or use --all-versions.");
+        return request.AllVersions ? matches : [matches[0]];
+    }
+
+    private Manifest LoadManifestFromPath(string manifestPath)
+    {
+        var resolved = ResolveManifestPath(manifestPath);
+        return ParseYamlManifest(File.ReadAllBytes(resolved));
+    }
+
+    private static string ResolveManifestPath(string manifestPath)
+    {
+        if (File.Exists(manifestPath))
+            return manifestPath;
+
+        if (!Directory.Exists(manifestPath))
+            throw new InvalidOperationException($"Manifest path not found: {manifestPath}");
+
+        var manifestFile = Directory.EnumerateFiles(manifestPath, "*.yaml")
+            .Concat(Directory.EnumerateFiles(manifestPath, "*.yml"))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        return manifestFile ?? throw new InvalidOperationException($"No manifest file found under: {manifestPath}");
     }
 
     // ── Internal search machinery ──
@@ -606,7 +790,7 @@ public class Repository : IDisposable
 
     // ── Manifest parsing ──
 
-    private static Manifest ParseYamlManifest(byte[] bytes)
+    internal static Manifest ParseYamlManifest(byte[] bytes)
     {
         var yaml = System.Text.Encoding.UTF8.GetString(bytes);
         var deserializer = new DeserializerBuilder()
@@ -652,6 +836,8 @@ public class Repository : IDisposable
             }
         }
 
+        var agreements = ReadAgreements(dict);
+
         // Top-level installer defaults (merged manifest format)
         string? topInstallerType = GetOptStr("InstallerType");
         string? topScope = GetOptStr("Scope");
@@ -660,6 +846,7 @@ public class Repository : IDisposable
         string? topReleaseDate = GetOptStr("ReleaseDate");
         string? topPackageFamilyName = GetOptStr("PackageFamilyName");
         string? topUpgradeCode = GetOptStr("UpgradeCode");
+        var topSwitches = ReadInstallerSwitches(dict);
 
         var installers = new List<Installer>();
         if (dict.TryGetValue("Installers", out var instObj) && instObj is IList<object> instList)
@@ -675,6 +862,8 @@ public class Repository : IDisposable
                         return arr.Select(x => x?.ToString() ?? "").Where(s => s != "").ToList();
                     }
 
+                    var switches = ReadInstallerSwitches(instDict).MergeWith(topSwitches);
+
                     installers.Add(new Installer
                     {
                         Architecture = InstStr("Architecture"),
@@ -687,6 +876,7 @@ public class Repository : IDisposable
                         ReleaseDate = InstStr("ReleaseDate") ?? topReleaseDate,
                         PackageFamilyName = InstStr("PackageFamilyName") ?? topPackageFamilyName,
                         UpgradeCode = InstStr("UpgradeCode") ?? topUpgradeCode,
+                        Switches = switches,
                         Commands = InstArr("Commands"),
                         PackageDependencies = InstArr("PackageDependencies"),
                     });
@@ -728,9 +918,85 @@ public class Repository : IDisposable
             ReleaseNotes = GetOptStr("ReleaseNotes"),
             ReleaseNotesUrl = GetOptStr("ReleaseNotesUrl"),
             Tags = tags,
+            Agreements = agreements,
             Documentation = docs,
             Installers = installers,
             PackageDependencies = dependencies,
+        };
+    }
+
+    private static List<PackageAgreement> ReadAgreements(IDictionary<object, object> values)
+    {
+        if (!values.TryGetValue("Agreements", out var agreementsObj) || agreementsObj is not IList<object> agreementsList)
+            return [];
+
+        var agreements = new List<PackageAgreement>();
+        foreach (var agreement in agreementsList)
+        {
+            if (agreement is not IDictionary<object, object> agreementDict)
+                continue;
+
+            agreements.Add(new PackageAgreement
+            {
+                Label = agreementDict.TryGetValue("AgreementLabel", out var label) ? label?.ToString() : null,
+                Text = agreementDict.TryGetValue("Agreement", out var text) ? text?.ToString() : null,
+                Url = agreementDict.TryGetValue("AgreementUrl", out var url) ? url?.ToString() : null,
+            });
+        }
+
+        return agreements;
+    }
+
+    private static List<PackageAgreement> ReadAgreements(IDictionary<string, object?> values)
+    {
+        if (!values.TryGetValue("Agreements", out var agreementsObj) || agreementsObj is not IList<object> agreementsList)
+            return [];
+
+        var agreements = new List<PackageAgreement>();
+        foreach (var agreement in agreementsList)
+        {
+            if (agreement is not IDictionary<object, object> agreementDict)
+                continue;
+
+            agreements.Add(new PackageAgreement
+            {
+                Label = agreementDict.TryGetValue("AgreementLabel", out var label) ? label?.ToString() : null,
+                Text = agreementDict.TryGetValue("Agreement", out var text) ? text?.ToString() : null,
+                Url = agreementDict.TryGetValue("AgreementUrl", out var url) ? url?.ToString() : null,
+            });
+        }
+
+        return agreements;
+    }
+
+    private static InstallerSwitches ReadInstallerSwitches(IDictionary<string, object?> values)
+    {
+        values.TryGetValue("InstallerSwitches", out var switchesObj);
+        switchesObj ??= values.TryGetValue("Switches", out var legacySwitches) ? legacySwitches : null;
+        return ReadInstallerSwitchesObject(switchesObj);
+    }
+
+    private static InstallerSwitches ReadInstallerSwitches(IDictionary<object, object> values)
+    {
+        values.TryGetValue("InstallerSwitches", out var switchesObj);
+        switchesObj ??= values.TryGetValue("Switches", out var legacySwitches) ? legacySwitches : null;
+        return ReadInstallerSwitchesObject(switchesObj);
+    }
+
+    private static InstallerSwitches ReadInstallerSwitchesObject(object? switchesObj)
+    {
+        if (switchesObj is not IDictionary<object, object> switches)
+            return new InstallerSwitches();
+
+        string? Get(string key) => switches.TryGetValue(key, out var value) ? value?.ToString() : null;
+        return new InstallerSwitches
+        {
+            Silent = Get("Silent"),
+            SilentWithProgress = Get("SilentWithProgress"),
+            Interactive = Get("Interactive"),
+            Custom = Get("Custom"),
+            Log = Get("Log"),
+            InstallLocation = Get("InstallLocation"),
         };
     }
 
@@ -810,6 +1076,14 @@ public class Repository : IDisposable
         }
 
         if (query.Name is not null && !MatchesText(pkg.Name, query.Name, query.Exact))
+            return false;
+
+        if (query.ProductCode is not null &&
+            !pkg.ProductCodes.Any(code => code.Equals(query.ProductCode, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        if (query.Version is not null &&
+            !pkg.InstalledVersion.Equals(query.Version, StringComparison.OrdinalIgnoreCase))
             return false;
 
         if (query.Query is not null)
@@ -994,6 +1268,7 @@ public class Repository : IDisposable
         Query = query.Query, Id = query.Id, Name = query.Name, Moniker = query.Moniker,
         Tag = query.Tag, Command = query.Command, Source = query.Source,
         Count = 500, Exact = query.Exact,
+        Version = null,
     };
 
     private List<int> ResolveSourceIndexes(string? sourceName)

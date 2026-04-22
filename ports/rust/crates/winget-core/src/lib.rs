@@ -11,7 +11,7 @@ use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::path::Path;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{Cursor, Read};
@@ -142,6 +142,8 @@ pub struct ListQuery {
     pub moniker: Option<String>,
     pub tag: Option<String>,
     pub command: Option<String>,
+    pub product_code: Option<String>,
+    pub version: Option<String>,
     pub source: Option<String>,
     pub count: Option<usize>,
     pub exact: bool,
@@ -221,6 +223,7 @@ pub struct Manifest {
     pub release_notes: Option<String>,
     pub release_notes_url: Option<String>,
     pub tags: Vec<String>,
+    pub agreements: Vec<PackageAgreement>,
     pub package_dependencies: Vec<String>,
     pub documentation: Vec<Documentation>,
     pub installers: Vec<Installer>,
@@ -230,6 +233,13 @@ pub struct Manifest {
 pub struct Documentation {
     pub label: Option<String>,
     pub url: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PackageAgreement {
+    pub label: Option<String>,
+    pub text: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -244,8 +254,92 @@ pub struct Installer {
     pub release_date: Option<String>,
     pub package_family_name: Option<String>,
     pub upgrade_code: Option<String>,
+    pub switches: InstallerSwitches,
     pub commands: Vec<String>,
     pub package_dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct InstallerSwitches {
+    pub silent: Option<String>,
+    pub silent_with_progress: Option<String>,
+    pub interactive: Option<String>,
+    pub custom: Option<String>,
+    pub log: Option<String>,
+    pub install_location: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallerMode {
+    Interactive,
+    SilentWithProgress,
+    Silent,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallRequest {
+    pub query: PackageQuery,
+    pub manifest_path: Option<PathBuf>,
+    pub mode: InstallerMode,
+    pub log_path: Option<PathBuf>,
+    pub custom: Option<String>,
+    pub override_args: Option<String>,
+    pub install_location: Option<String>,
+    pub skip_dependencies: bool,
+    pub dependencies_only: bool,
+    pub accept_package_agreements: bool,
+    pub force: bool,
+    pub rename: Option<String>,
+    pub uninstall_previous: bool,
+}
+
+impl InstallRequest {
+    pub fn new(query: PackageQuery) -> Self {
+        Self {
+            query,
+            manifest_path: None,
+            mode: InstallerMode::SilentWithProgress,
+            log_path: None,
+            custom: None,
+            override_args: None,
+            install_location: None,
+            skip_dependencies: false,
+            dependencies_only: false,
+            accept_package_agreements: false,
+            force: false,
+            rename: None,
+            uninstall_previous: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UninstallRequest {
+    pub query: PackageQuery,
+    pub manifest_path: Option<PathBuf>,
+    pub product_code: Option<String>,
+    pub mode: InstallerMode,
+    pub all_versions: bool,
+    pub force: bool,
+    pub purge: bool,
+    pub preserve: bool,
+    pub log_path: Option<PathBuf>,
+}
+
+impl UninstallRequest {
+    pub fn new(query: PackageQuery) -> Self {
+        Self {
+            query,
+            manifest_path: None,
+            product_code: None,
+            mode: InstallerMode::SilentWithProgress,
+            all_versions: false,
+            force: false,
+            purge: false,
+            preserve: false,
+            log_path: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -442,6 +536,15 @@ impl Manifest {
                     .collect(),
             ),
         );
+        object.insert(
+            "Agreements".to_string(),
+            JsonValue::Array(
+                self.agreements
+                    .iter()
+                    .map(PackageAgreement::structured_document)
+                    .collect(),
+            ),
+        );
         if !self.package_dependencies.is_empty() {
             object.insert(
                 "Dependencies".to_string(),
@@ -475,6 +578,16 @@ impl Documentation {
         let mut object = JsonMap::new();
         insert_optional_json_string(&mut object, "DocumentLabel", self.label.as_deref());
         object.insert("DocumentUrl".to_string(), JsonValue::String(self.url.clone()));
+        JsonValue::Object(object)
+    }
+}
+
+impl PackageAgreement {
+    fn structured_document(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        insert_optional_json_string(&mut object, "AgreementLabel", self.label.as_deref());
+        insert_optional_json_string(&mut object, "Agreement", self.text.as_deref());
+        insert_optional_json_string(&mut object, "AgreementUrl", self.url.as_deref());
         JsonValue::Object(object)
     }
 }
@@ -530,6 +643,62 @@ impl Installer {
                 package_dependencies_document(&self.package_dependencies),
             );
         }
+        if !self.switches.is_empty() {
+            object.insert(
+                "InstallerSwitches".to_string(),
+                self.switches.structured_document(),
+            );
+        }
+        JsonValue::Object(object)
+    }
+}
+
+impl InstallerSwitches {
+    fn with_fallback(&self, fallback: &Self) -> Self {
+        Self {
+            silent: self.silent.clone().or_else(|| fallback.silent.clone()),
+            silent_with_progress: self
+                .silent_with_progress
+                .clone()
+                .or_else(|| fallback.silent_with_progress.clone()),
+            interactive: self
+                .interactive
+                .clone()
+                .or_else(|| fallback.interactive.clone()),
+            custom: self.custom.clone().or_else(|| fallback.custom.clone()),
+            log: self.log.clone().or_else(|| fallback.log.clone()),
+            install_location: self
+                .install_location
+                .clone()
+                .or_else(|| fallback.install_location.clone()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.silent.is_none()
+            && self.silent_with_progress.is_none()
+            && self.interactive.is_none()
+            && self.custom.is_none()
+            && self.log.is_none()
+            && self.install_location.is_none()
+    }
+
+    fn structured_document(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        insert_optional_json_string(&mut object, "Silent", self.silent.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "SilentWithProgress",
+            self.silent_with_progress.as_deref(),
+        );
+        insert_optional_json_string(&mut object, "Interactive", self.interactive.as_deref());
+        insert_optional_json_string(&mut object, "Custom", self.custom.as_deref());
+        insert_optional_json_string(&mut object, "Log", self.log.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "InstallLocation",
+            self.install_location.as_deref(),
+        );
         JsonValue::Object(object)
     }
 }
@@ -1022,9 +1191,16 @@ impl Repository {
         query: &PackageQuery,
         download_dir: &Path,
     ) -> Result<(Manifest, PathBuf)> {
-        let (located, _warnings) = self.find_single_match(query)?;
-        let (manifest, _cached_files) = self.manifest_for_match(&located, query)?;
-        let installer = select_installer(&manifest.installers, query)
+        self.download_installer_for_request(&InstallRequest::new(query.clone()), download_dir)
+    }
+
+    pub fn download_installer_for_request(
+        &mut self,
+        request: &InstallRequest,
+        download_dir: &Path,
+    ) -> Result<(Manifest, PathBuf)> {
+        let manifest = self.resolve_manifest_for_install(request)?;
+        let installer = select_installer(&manifest.installers, &request.query)
             .ok_or_else(|| anyhow!("No applicable installer found for the current system"))?;
         let url = installer
             .url
@@ -1032,13 +1208,14 @@ impl Repository {
             .ok_or_else(|| anyhow!("Installer has no URL"))?;
 
         fs::create_dir_all(download_dir)?;
-        let filename = url
-            .rsplit('/')
-            .next()
-            .unwrap_or("installer")
-            .split('?')
-            .next()
-            .unwrap_or("installer");
+        let filename = request.rename.as_deref().unwrap_or_else(|| {
+            url.rsplit('/')
+                .next()
+                .unwrap_or("installer")
+                .split('?')
+                .next()
+                .unwrap_or("installer")
+        });
         let dest = download_dir.join(filename);
 
         let response = self
@@ -1067,10 +1244,62 @@ impl Repository {
     }
 
     pub fn install(&mut self, query: &PackageQuery, silent: bool) -> Result<InstallResult> {
-        let temp_dir = std::env::temp_dir().join("winget-rs-install");
-        let (manifest, installer_path) = self.download_installer(query, &temp_dir)?;
-        let installer = select_installer(&manifest.installers, query)
+        let mut request = InstallRequest::new(query.clone());
+        request.mode = if silent {
+            InstallerMode::Silent
+        } else {
+            InstallerMode::SilentWithProgress
+        };
+        self.install_request(&request)
+    }
+
+    pub fn install_with_mode(
+        &mut self,
+        query: &PackageQuery,
+        mode: InstallerMode,
+    ) -> Result<InstallResult> {
+        let mut request = InstallRequest::new(query.clone());
+        request.mode = mode;
+        self.install_request(&request)
+    }
+
+    pub fn install_request(&mut self, request: &InstallRequest) -> Result<InstallResult> {
+        let manifest = self.resolve_manifest_for_install(request)?;
+        self.ensure_package_agreements_accepted(&manifest, request)?;
+        self.install_dependencies(&manifest, request, &mut HashSet::new())?;
+
+        if request.dependencies_only {
+            return Ok(InstallResult {
+                package_id: manifest.id.clone(),
+                version: manifest.version.clone(),
+                installer_path: PathBuf::new(),
+                installer_type: "dependencies".to_string(),
+                exit_code: 0,
+                success: true,
+            });
+        }
+
+        let installer = select_installer(&manifest.installers, &request.query)
             .ok_or_else(|| anyhow!("No applicable installer found"))?;
+
+        if request.uninstall_previous {
+            let mut uninstall_request = UninstallRequest::new(PackageQuery {
+                id: request.query.id.clone().or_else(|| Some(manifest.id.clone())),
+                query: request.query.query.clone().or_else(|| Some(manifest.id.clone())),
+                source: request.query.source.clone(),
+                exact: true,
+                version: request.query.version.clone(),
+                ..PackageQuery::default()
+            });
+            uninstall_request.product_code = installer.product_code.clone();
+            uninstall_request.mode = InstallerMode::Silent;
+            uninstall_request.all_versions = true;
+            uninstall_request.force = true;
+            let _ = self.uninstall_request(&uninstall_request);
+        }
+
+        let temp_dir = std::env::temp_dir().join("winget-rs-install");
+        let (_, installer_path) = self.download_installer_for_request(request, &temp_dir)?;
 
         let installer_type = installer
             .installer_type
@@ -1078,7 +1307,8 @@ impl Repository {
             .unwrap_or("exe")
             .to_lowercase();
 
-        let exit_code = dispatch_installer(&installer_path, &installer_type, silent, &installer)?;
+        let exit_code =
+            dispatch_installer(&installer_path, &installer_type, request, &manifest, &installer)?;
 
         Ok(InstallResult {
             package_id: manifest.id.clone(),
@@ -1091,42 +1321,167 @@ impl Repository {
     }
 
     pub fn uninstall(&mut self, query: &PackageQuery, silent: bool) -> Result<InstallResult> {
+        let mut request = UninstallRequest::new(query.clone());
+        request.mode = if silent {
+            InstallerMode::Silent
+        } else {
+            InstallerMode::SilentWithProgress
+        };
+        self.uninstall_request(&request)
+    }
+
+    pub fn uninstall_request(&mut self, request: &UninstallRequest) -> Result<InstallResult> {
+        let matches = self.resolve_uninstall_matches(request)?;
+        let mut exit_code = 0;
+
+        for installed in &matches {
+            exit_code = uninstall_package(installed, request)?;
+            if exit_code != 0 && !request.all_versions {
+                break;
+            }
+        }
+
+        let installed = matches
+            .first()
+            .ok_or_else(|| anyhow!("No installed package found matching the query"))?;
+
+        Ok(InstallResult {
+            package_id: installed.id.clone(),
+            version: installed.installed_version.clone(),
+            installer_path: PathBuf::new(),
+            installer_type: installed
+                .installer_category
+                .clone()
+                .unwrap_or_else(|| "uninstall".to_string()),
+            exit_code,
+            success: exit_code == 0,
+        })
+    }
+
+    fn resolve_manifest_for_install(&mut self, request: &InstallRequest) -> Result<Manifest> {
+        if let Some(path) = &request.manifest_path {
+            return self.load_manifest_from_path(path);
+        }
+
+        let (located, _warnings) = self.find_single_match(&request.query)?;
+        let (manifest, _cached_files) = self.manifest_for_match(&located, &request.query)?;
+        Ok(manifest)
+    }
+
+    fn ensure_package_agreements_accepted(
+        &self,
+        manifest: &Manifest,
+        request: &InstallRequest,
+    ) -> Result<()> {
+        if !request.accept_package_agreements && !manifest.agreements.is_empty() {
+            bail!("Package agreements are present; rerun with --accept-package-agreements to continue.");
+        }
+        Ok(())
+    }
+
+    fn install_dependencies(
+        &mut self,
+        manifest: &Manifest,
+        request: &InstallRequest,
+        visited: &mut HashSet<String>,
+    ) -> Result<()> {
+        if request.skip_dependencies {
+            return Ok(());
+        }
+
+        let dependency_ids = manifest
+            .package_dependencies
+            .iter()
+            .chain(
+                manifest
+                    .installers
+                    .iter()
+                    .flat_map(|installer| installer.package_dependencies.iter()),
+            )
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        for dependency_id in dependency_ids {
+            if !visited.insert(dependency_id.clone()) {
+                continue;
+            }
+
+            let mut dependency_request = InstallRequest::new(PackageQuery {
+                id: Some(dependency_id),
+                source: request.query.source.clone(),
+                exact: true,
+                ..PackageQuery::default()
+            });
+            dependency_request.mode = request.mode;
+            dependency_request.accept_package_agreements = request.accept_package_agreements;
+            dependency_request.force = request.force;
+            self.install_request(&dependency_request)?;
+        }
+
+        Ok(())
+    }
+
+    fn resolve_uninstall_matches(&mut self, request: &UninstallRequest) -> Result<Vec<ListMatch>> {
+        let mut effective_query = request.query.clone();
+        let mut effective_product_code = request.product_code.clone();
+
+        if let Some(path) = &request.manifest_path {
+            let manifest = self.load_manifest_from_path(path)?;
+            effective_query = PackageQuery {
+                query: Some(manifest.id.clone()),
+                id: Some(manifest.id.clone()),
+                name: Some(manifest.name.clone()),
+                exact: true,
+                version: effective_query.version.clone().or_else(|| Some(manifest.version)),
+                ..PackageQuery::default()
+            };
+            effective_product_code = effective_product_code.or_else(|| {
+                manifest
+                    .installers
+                    .iter()
+                    .find_map(|installer| installer.product_code.clone())
+            });
+        }
+
         let list_query = ListQuery {
-            query: query.query.clone(),
-            id: query.id.clone(),
-            name: query.name.clone(),
-            moniker: query.moniker.clone(),
+            query: effective_query.query.clone(),
+            id: effective_query.id.clone(),
+            name: effective_query.name.clone(),
+            moniker: effective_query.moniker.clone(),
             tag: None,
             command: None,
-            source: query.source.clone(),
-            count: Some(10),
-            exact: false,
-            install_scope: None,
+            product_code: effective_product_code,
+            version: effective_query.version.clone(),
+            source: effective_query.source.clone(),
+            count: if request.all_versions { None } else { Some(100) },
+            exact: effective_query.exact,
+            install_scope: effective_query.install_scope.clone(),
             upgrade_only: false,
             include_unknown: false,
             include_pinned: false,
         };
+
         let list_result = self.list(&list_query)?;
+        if list_result.matches.is_empty() {
+            bail!("No installed package found matching the query");
+        }
+        if !request.all_versions && list_result.matches.len() > 1 && !request.force {
+            bail!("Multiple installed packages matched the query; refine the query or use --all-versions.");
+        }
 
-        let installed = list_result
-            .matches
-            .first()
-            .ok_or_else(|| anyhow!("No installed package found matching the query"))?;
-
-        let uninstall_id = installed.id.clone();
-        let version = installed.installed_version.clone();
-
-        // Try to find uninstall information from ARP registry
-        let exit_code = uninstall_package(&uninstall_id, silent)?;
-
-        Ok(InstallResult {
-            package_id: uninstall_id,
-            version,
-            installer_path: PathBuf::new(),
-            installer_type: "uninstall".to_string(),
-            exit_code,
-            success: exit_code == 0,
+        Ok(if request.all_versions {
+            list_result.matches
+        } else {
+            vec![list_result.matches[0].clone()]
         })
+    }
+
+    fn load_manifest_from_path(&self, manifest_path: &Path) -> Result<Manifest> {
+        let resolved = resolve_manifest_path(manifest_path)?;
+        let bytes = fs::read(&resolved)
+            .with_context(|| format!("failed to read manifest from {}", resolved.display()))?;
+        parse_yaml_manifest(&bytes)
     }
 
     fn find_single_match(&mut self, query: &PackageQuery) -> Result<(LocatedMatch, Vec<String>)> {
@@ -1927,6 +2282,21 @@ fn list_package_matches(package: &InstalledPackage, query: &ListQuery) -> bool {
 
     if let Some(value) = &query.name
         && !matches_text(&package.name, value, query.exact)
+    {
+        return false;
+    }
+
+    if let Some(value) = &query.product_code
+        && !package
+            .product_codes
+            .iter()
+            .any(|code| code.eq_ignore_ascii_case(value))
+    {
+        return false;
+    }
+
+    if let Some(value) = &query.version
+        && !package.installed_version.eq_ignore_ascii_case(value)
     {
         return false;
     }
@@ -3253,6 +3623,28 @@ fn search_match_has_unknown_version(candidate: &SearchMatch) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("Unknown"))
 }
 
+fn resolve_manifest_path(manifest_path: &Path) -> Result<PathBuf> {
+    if manifest_path.is_file() {
+        return Ok(manifest_path.to_path_buf());
+    }
+
+    if !manifest_path.is_dir() {
+        bail!("Manifest path not found: {}", manifest_path.display());
+    }
+
+    let candidate = fs::read_dir(manifest_path)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
+        })
+        .min();
+
+    candidate.ok_or_else(|| anyhow!("No manifest file found under: {}", manifest_path.display()))
+}
+
 fn score_text_match(
     candidate: &str,
     query: &str,
@@ -3365,6 +3757,7 @@ fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
         release_notes: yaml_localized_string(&merged, "ReleaseNotes"),
         release_notes_url: yaml_localized_string(&merged, "ReleaseNotesUrl"),
         tags: yaml_string_list(&merged, "Tags"),
+        agreements: yaml_agreement_list(&merged),
         package_dependencies: yaml_package_dependencies(&merged),
         documentation: yaml_documentation_list(&merged),
         installers,
@@ -3400,6 +3793,7 @@ fn parse_rest_manifest(
         .ok_or_else(|| anyhow!("REST manifest response missing DefaultLocale"))?;
     let name = json_string(default_locale, "PackageName")
         .ok_or_else(|| anyhow!("REST manifest response missing PackageName"))?;
+    let installer_switch_defaults = json_installer_switches(selected);
 
     let installers = selected
         .get("Installers")
@@ -3418,6 +3812,8 @@ fn parse_rest_manifest(
                     release_date: json_string(item, "ReleaseDate"),
                     package_family_name: json_string(item, "PackageFamilyName"),
                     upgrade_code: json_string(item, "UpgradeCode"),
+                    switches: json_installer_switches(item)
+                        .with_fallback(&installer_switch_defaults),
                     commands: json_string_list(item, "Commands"),
                     package_dependencies: json_package_dependencies(item),
                 })
@@ -3446,6 +3842,7 @@ fn parse_rest_manifest(
         release_notes: json_string(default_locale, "ReleaseNotes"),
         release_notes_url: json_string(default_locale, "ReleaseNotesUrl"),
         tags: json_string_list(default_locale, "Tags"),
+        agreements: json_agreement_list(default_locale),
         package_dependencies: json_package_dependencies(selected),
         documentation: json_documentation_list(default_locale),
         installers,
@@ -3454,6 +3851,7 @@ fn parse_rest_manifest(
 
 fn parse_yaml_installers(root: &YamlMapping) -> Vec<Installer> {
     let base = installer_defaults(root);
+    let base_switches = yaml_installer_switches(root);
     if let Some(items) = root
         .get(YamlValue::from("Installers"))
         .and_then(YamlValue::as_sequence)
@@ -3464,7 +3862,8 @@ fn parse_yaml_installers(root: &YamlMapping) -> Vec<Installer> {
             .map(|item| {
                 let mut merged = base.clone();
                 merge_yaml_mapping(&mut merged, item);
-                installer_from_yaml(&merged)
+                let switches = yaml_installer_switches(item).with_fallback(&base_switches);
+                installer_from_yaml(&merged, switches)
             })
             .collect::<Vec<_>>();
         if !installers.is_empty() {
@@ -3475,7 +3874,7 @@ fn parse_yaml_installers(root: &YamlMapping) -> Vec<Installer> {
     if base.is_empty() {
         Vec::new()
     } else {
-        vec![installer_from_yaml(&base)]
+        vec![installer_from_yaml(&base, base_switches)]
     }
 }
 
@@ -3502,7 +3901,7 @@ fn installer_defaults(root: &YamlMapping) -> YamlMapping {
     defaults
 }
 
-fn installer_from_yaml(root: &YamlMapping) -> Installer {
+fn installer_from_yaml(root: &YamlMapping, switches: InstallerSwitches) -> Installer {
     Installer {
         architecture: yaml_string(root, "Architecture"),
         installer_type: yaml_string(root, "InstallerType"),
@@ -3514,8 +3913,32 @@ fn installer_from_yaml(root: &YamlMapping) -> Installer {
         release_date: yaml_string(root, "ReleaseDate"),
         package_family_name: yaml_string(root, "PackageFamilyName"),
         upgrade_code: yaml_string(root, "UpgradeCode"),
+        switches,
         commands: yaml_string_list(root, "Commands"),
         package_dependencies: yaml_package_dependencies(root),
+    }
+}
+
+fn yaml_installer_switches(root: &YamlMapping) -> InstallerSwitches {
+    let mapping = root
+        .get(YamlValue::from("InstallerSwitches"))
+        .or_else(|| root.get(YamlValue::from("Switches")))
+        .and_then(YamlValue::as_mapping);
+    yaml_installer_switches_from_mapping(mapping)
+}
+
+fn yaml_installer_switches_from_mapping(mapping: Option<&YamlMapping>) -> InstallerSwitches {
+    let string = |key: &str| {
+        mapping.and_then(|mapping| mapping.get(YamlValue::from(key)).and_then(yaml_scalar_string))
+    };
+
+    InstallerSwitches {
+        silent: string("Silent"),
+        silent_with_progress: string("SilentWithProgress"),
+        interactive: string("Interactive"),
+        custom: string("Custom"),
+        log: string("Log"),
+        install_location: string("InstallLocation"),
     }
 }
 
@@ -3578,6 +4001,23 @@ fn yaml_documentation_list(root: &YamlMapping) -> Vec<Documentation> {
         .unwrap_or_default()
 }
 
+fn yaml_agreement_list(root: &YamlMapping) -> Vec<PackageAgreement> {
+    root.get(YamlValue::from("Agreements"))
+        .and_then(YamlValue::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(YamlValue::as_mapping)
+                .map(|item| PackageAgreement {
+                    label: yaml_string(item, "AgreementLabel"),
+                    text: yaml_string(item, "Agreement"),
+                    url: yaml_string(item, "AgreementUrl"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn yaml_package_dependencies(root: &YamlMapping) -> Vec<String> {
     root.get(YamlValue::from("Dependencies"))
         .and_then(YamlValue::as_mapping)
@@ -3633,6 +4073,23 @@ fn json_documentation_list(value: &JsonValue) -> Vec<Documentation> {
         .unwrap_or_default()
 }
 
+fn json_agreement_list(value: &JsonValue) -> Vec<PackageAgreement> {
+    value
+        .get("Agreements")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| PackageAgreement {
+                    label: json_string(item, "AgreementLabel"),
+                    text: json_string(item, "Agreement"),
+                    url: json_string(item, "AgreementUrl"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn json_package_dependencies(value: &JsonValue) -> Vec<String> {
     value
         .get("Dependencies")
@@ -3646,6 +4103,29 @@ fn json_package_dependencies(value: &JsonValue) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn json_installer_switches(value: &JsonValue) -> InstallerSwitches {
+    let switches = value
+        .get("InstallerSwitches")
+        .or_else(|| value.get("Switches"))
+        .and_then(JsonValue::as_object);
+
+    let string = |key: &str| {
+        switches
+            .and_then(|switches| switches.get(key))
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+    };
+
+    InstallerSwitches {
+        silent: string("Silent"),
+        silent_with_progress: string("SilentWithProgress"),
+        interactive: string("Interactive"),
+        custom: string("Custom"),
+        log: string("Log"),
+        install_location: string("InstallLocation"),
+    }
 }
 
 fn merge_yaml_mapping(target: &mut YamlMapping, source: &YamlMapping) {
@@ -4062,7 +4542,8 @@ fn pins_db_path(app_root: &Path) -> PathBuf {
 fn dispatch_installer(
     installer_path: &Path,
     installer_type: &str,
-    silent: bool,
+    request: &InstallRequest,
+    manifest: &Manifest,
     installer: &Installer,
 ) -> Result<i32> {
     use std::process::Command;
@@ -4070,12 +4551,13 @@ fn dispatch_installer(
     match installer_type {
         "msi" | "wix" => {
             let mut cmd = Command::new("msiexec");
-            cmd.arg("/i").arg(installer_path);
-            if silent {
-                cmd.arg("/quiet").arg("/norestart");
-            } else {
-                cmd.arg("/passive").arg("/norestart");
-            }
+            cmd.args(installer_command_arguments(
+                installer_type,
+                request,
+                manifest,
+                installer_path,
+                installer,
+            ));
             let status = cmd.status().context("failed to run msiexec")?;
             Ok(status.code().unwrap_or(-1))
         }
@@ -4103,17 +4585,13 @@ fn dispatch_installer(
         // exe, inno, nullsoft, burn, etc.
         _ => {
             let mut cmd = Command::new(installer_path);
-            if silent {
-                // Try common silent switches
-                cmd.arg("/S").arg("/SILENT").arg("/VERYSILENT");
-            }
-            // Apply custom switches from manifest if available
-            if let Some(ref commands) = installer.commands.first() {
-                if !commands.is_empty() {
-                    cmd.arg(commands);
-                }
-            }
-            let _ = &installer; // suppress unused
+            cmd.args(installer_command_arguments(
+                installer_type,
+                request,
+                manifest,
+                installer_path,
+                installer,
+            ));
             let status = cmd.status().context("failed to run installer")?;
             Ok(status.code().unwrap_or(-1))
         }
@@ -4124,17 +4602,202 @@ fn dispatch_installer(
 fn dispatch_installer(
     _installer_path: &Path,
     _installer_type: &str,
-    _silent: bool,
+    _request: &InstallRequest,
+    _manifest: &Manifest,
     _installer: &Installer,
 ) -> Result<i32> {
     bail!("Installing packages is only supported on Windows")
 }
 
+fn installer_command_arguments(
+    installer_type: &str,
+    request: &InstallRequest,
+    _manifest: &Manifest,
+    installer_path: &Path,
+    installer: &Installer,
+) -> Vec<String> {
+    if let Some(override_args) = request.override_args.as_deref() {
+        return split_installer_switches(override_args);
+    }
+
+    let mut args = Vec::new();
+    match installer_type {
+        "msi" | "wix" => {
+            args.push("/i".to_string());
+            args.push(installer_path.display().to_string());
+        }
+        "msix" | "appx" | "zip" => return Vec::new(),
+        _ => {}
+    }
+
+    let configured = match request.mode {
+        InstallerMode::Interactive => installer.switches.interactive.as_deref(),
+        InstallerMode::SilentWithProgress => installer
+            .switches
+            .silent_with_progress
+            .as_deref()
+            .or(installer.switches.silent.as_deref()),
+        InstallerMode::Silent => installer
+            .switches
+            .silent
+            .as_deref()
+            .or(installer.switches.silent_with_progress.as_deref()),
+    };
+
+    if let Some(value) = configured.filter(|value| !value.trim().is_empty()) {
+        args.extend(split_installer_switches(value));
+    } else {
+        args.extend(default_installer_arguments(installer_type, request.mode));
+    }
+
+    append_switches(
+        &mut args,
+        resolve_template_switch(
+            installer.switches.log.as_deref(),
+            default_log_switch(installer_type),
+            request.log_path.as_ref().map(|path| path.display().to_string()),
+            "<LOGPATH>",
+        ),
+    );
+    append_switches(&mut args, installer.switches.custom.clone());
+    append_switches(&mut args, request.custom.clone());
+    append_switches(
+        &mut args,
+        resolve_template_switch(
+            installer.switches.install_location.as_deref(),
+            default_install_location_switch(installer_type),
+            request.install_location.clone(),
+            "<INSTALLPATH>",
+        ),
+    );
+    args
+}
+
+fn default_installer_arguments(installer_type: &str, mode: InstallerMode) -> Vec<String> {
+    match mode {
+        InstallerMode::Interactive => Vec::new(),
+        InstallerMode::SilentWithProgress => match installer_type {
+            "inno" => vec![
+                "/SP-".to_string(),
+                "/SILENT".to_string(),
+                "/SUPPRESSMSGBOXES".to_string(),
+                "/NORESTART".to_string(),
+            ],
+            "burn" | "wix" | "msi" => vec!["/passive".to_string(), "/norestart".to_string()],
+            "nullsoft" | "nsis" => vec!["/S".to_string()],
+            _ => vec!["/SILENT".to_string()],
+        },
+        InstallerMode::Silent => match installer_type {
+            "inno" => vec![
+                "/SP-".to_string(),
+                "/VERYSILENT".to_string(),
+                "/SUPPRESSMSGBOXES".to_string(),
+                "/NORESTART".to_string(),
+            ],
+            "burn" | "wix" | "msi" => vec!["/quiet".to_string(), "/norestart".to_string()],
+            "nullsoft" | "nsis" => vec!["/S".to_string()],
+            _ => vec!["/S".to_string()],
+        },
+    }
+}
+
+fn default_log_switch(installer_type: &str) -> Option<&'static str> {
+    match installer_type {
+        "burn" | "wix" | "msi" => Some("/log \"<LOGPATH>\""),
+        "inno" => Some("/LOG=\"<LOGPATH>\""),
+        _ => None,
+    }
+}
+
+fn default_install_location_switch(installer_type: &str) -> Option<&'static str> {
+    match installer_type {
+        "burn" | "wix" | "msi" => Some("TARGETDIR=\"<INSTALLPATH>\""),
+        "nullsoft" | "nsis" => Some("/D=<INSTALLPATH>"),
+        "inno" => Some("/DIR=\"<INSTALLPATH>\""),
+        _ => None,
+    }
+}
+
+fn resolve_template_switch(
+    manifest_value: Option<&str>,
+    fallback: Option<&str>,
+    replacement: Option<String>,
+    token: &str,
+) -> Option<String> {
+    let template = manifest_value
+        .filter(|value| !value.trim().is_empty())
+        .or(fallback)?;
+    let replacement = replacement?;
+    Some(template.replace(token, &replacement))
+}
+
+fn append_switches(args: &mut Vec<String>, value: Option<String>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        args.extend(split_installer_switches(&value));
+    }
+}
+
+fn split_installer_switches(value: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for ch in value.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    args
+}
+
 #[cfg(windows)]
-fn uninstall_package(package_id: &str, silent: bool) -> Result<i32> {
+fn uninstall_package(installed: &ListMatch, request: &UninstallRequest) -> Result<i32> {
+    if request.purge && request.preserve {
+        bail!("--purge and --preserve cannot be used together.");
+    }
+
+    if installed
+        .installer_category
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("portable"))
+    {
+        return uninstall_portable(installed, request);
+    }
+
+    if (request.purge || request.preserve) && !request.force {
+        bail!("--purge and --preserve are currently only supported for portable packages.");
+    }
+
+    if let Some(exit_code) = try_uninstall_arp(installed, request)? {
+        return Ok(exit_code);
+    }
+
+    if let Some(exit_code) = try_uninstall_msix(installed)? {
+        return Ok(exit_code);
+    }
+
+    bail!(
+        "No uninstall command found for installed package '{}' ({})",
+        installed.name,
+        installed.local_id
+    );
+}
+
+#[cfg(windows)]
+fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Result<Option<i32>> {
     use std::process::Command;
 
-    // Search ARP registry for uninstall command
     let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
 
@@ -4150,48 +4813,257 @@ fn uninstall_package(package_id: &str, silent: bool) -> Result<i32> {
                     if let Ok(subkey) = key.open_subkey(&subkey_name) {
                         let display_name: String =
                             subkey.get_value("DisplayName").unwrap_or_default();
-                        if subkey_name.eq_ignore_ascii_case(package_id)
-                            || display_name.eq_ignore_ascii_case(package_id)
-                        {
-                            // Found it — try QuietUninstallString first, then UninstallString
-                            let uninstall_cmd: String = subkey
-                                .get_value("QuietUninstallString")
-                                .or_else(|_| subkey.get_value("UninstallString"))
-                                .context("No uninstall command found in registry")?;
-
-                            let mut cmd = Command::new("cmd");
-                            cmd.arg("/C").arg(&uninstall_cmd);
-                            if silent {
-                                // Append common silent flags if not already quiet
-                                if !uninstall_cmd.contains("/S")
-                                    && !uninstall_cmd.contains("/quiet")
-                                {
-                                    cmd.arg("/S");
-                                }
-                            }
-                            let status =
-                                cmd.status().context("failed to run uninstaller")?;
-                            return Ok(status.code().unwrap_or(-1));
+                        let product_code = subkey.get_value::<String, _>("ProductCode").ok();
+                        if !registry_entry_matches_installed_package(
+                            &subkey_name,
+                            &display_name,
+                            product_code.as_deref(),
+                            installed,
+                        ) {
+                            continue;
                         }
+
+                        if let Some(exit_code) =
+                            try_run_msi_uninstall(installed, &subkey_name, product_code.as_deref(), request)?
+                        {
+                            return Ok(Some(exit_code));
+                        }
+
+                        let quiet_uninstall_cmd =
+                            subkey.get_value::<String, _>("QuietUninstallString").ok();
+                        let uninstall_cmd: String = if request.mode == InstallerMode::Interactive {
+                            subkey.get_value("UninstallString").ok()
+                        } else {
+                            quiet_uninstall_cmd
+                                .clone()
+                                .or_else(|| subkey.get_value("UninstallString").ok())
+                        }
+                            .context("No uninstall command found in registry")?;
+
+                        let mut cmd = Command::new("cmd");
+                        let log_path = request
+                            .log_path
+                            .as_ref()
+                            .map(|value| value.display().to_string());
+                        cmd.arg("/C").arg(build_uninstall_command_with_mode(
+                            &uninstall_cmd,
+                            request.mode,
+                            quiet_uninstall_cmd.is_some(),
+                            log_path.as_deref(),
+                        ));
+                        let status = cmd.status().context("failed to run uninstaller")?;
+                        return Ok(Some(status.code().unwrap_or(-1)));
                     }
                 }
             }
         }
     }
 
-    // Try MSIX removal
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn try_uninstall_msix(installed: &ListMatch) -> Result<Option<i32>> {
+    use std::process::Command;
+
+    if !installed.local_id.starts_with("MSIX\\") && installed.package_family_names.is_empty() {
+        return Ok(None);
+    }
+
+    let package_full_name = installed.local_id.strip_prefix("MSIX\\");
     let mut cmd = Command::new("powershell");
     cmd.arg("-NoProfile")
         .arg("-Command")
-        .arg(format!(
-            "Get-AppxPackage -Name '*{package_id}*' | Remove-AppxPackage"
+        .arg(build_msix_uninstall_script(
+            package_full_name,
+            &installed.package_family_names,
         ));
     let status = cmd.status().context("failed to run Remove-AppxPackage")?;
-    Ok(status.code().unwrap_or(-1))
+    Ok(Some(status.code().unwrap_or(-1)))
+}
+
+#[cfg(windows)]
+fn arp_subkey_name(local_id: &str) -> Option<&str> {
+    local_id.strip_prefix("ARP\\")?.splitn(3, '\\').nth(2)
+}
+
+#[cfg(windows)]
+fn registry_entry_matches_installed_package(
+    subkey_name: &str,
+    display_name: &str,
+    product_code: Option<&str>,
+    installed: &ListMatch,
+) -> bool {
+    if let Some(arp_subkey_name) = arp_subkey_name(&installed.local_id) {
+        if subkey_name.eq_ignore_ascii_case(arp_subkey_name) {
+            return true;
+        }
+    }
+
+    if installed.product_codes.iter().any(|code| {
+        code.eq_ignore_ascii_case(subkey_name)
+            || product_code
+                .map(|value| code.eq_ignore_ascii_case(value))
+                .unwrap_or(false)
+    }) {
+        return true;
+    }
+
+    display_name.eq_ignore_ascii_case(&installed.name)
+}
+
+#[cfg(all(windows, test))]
+fn build_uninstall_command(uninstall_cmd: &str, silent: bool, has_quiet_command: bool) -> String {
+    build_uninstall_command_with_mode(
+        uninstall_cmd,
+        if silent {
+            InstallerMode::Silent
+        } else {
+            InstallerMode::Interactive
+        },
+        has_quiet_command,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn build_uninstall_command_with_mode(
+    uninstall_cmd: &str,
+    mode: InstallerMode,
+    has_quiet_command: bool,
+    log_path: Option<&str>,
+) -> String {
+    let uninstall_cmd = log_path
+        .map(|value| uninstall_cmd.replace("<LOGPATH>", value))
+        .unwrap_or_else(|| uninstall_cmd.to_string());
+    if mode == InstallerMode::Interactive || has_quiet_command {
+        return uninstall_cmd;
+    }
+
+    let lower = uninstall_cmd.to_ascii_lowercase();
+    if lower.contains("/quiet")
+        || lower.contains("/passive")
+        || lower.contains("/verysilent")
+        || lower.contains("/silent")
+        || lower.contains(" /s")
+    {
+        return uninstall_cmd.to_string();
+    }
+
+    format!("{uninstall_cmd} /S")
+}
+
+#[cfg(windows)]
+fn build_msix_uninstall_script(
+    package_full_name: Option<&str>,
+    package_family_names: &[String],
+) -> String {
+    let full_name_literal = package_full_name
+        .map(|value| format!("'{}'", value.replace('\'', "''")))
+        .unwrap_or_else(|| "$null".to_string());
+    let family_names_literal = if package_family_names.is_empty() {
+        "@()".to_string()
+    } else {
+        format!(
+            "@({})",
+            package_family_names
+                .iter()
+                .map(|value| format!("'{}'", value.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    format!(
+        "$fullName = {full_name_literal}; \
+         $familyNames = {family_names_literal}; \
+         $targets = Get-AppxPackage | Where-Object {{ \
+         (($fullName -ne $null) -and $_.PackageFullName -eq $fullName) -or \
+         ($familyNames.Count -gt 0 -and ($familyNames -contains $_.PackageFamilyName)) }}; \
+         if (-not $targets) {{ exit 1 }}; \
+         $targets | Remove-AppxPackage"
+    )
+}
+
+#[cfg(windows)]
+fn try_run_msi_uninstall(
+    installed: &ListMatch,
+    subkey_name: &str,
+    product_code: Option<&str>,
+    request: &UninstallRequest,
+) -> Result<Option<i32>> {
+    use std::process::Command;
+
+    let uninstall_code = installed
+        .product_codes
+        .iter()
+        .map(String::as_str)
+        .chain(product_code)
+        .chain(Some(subkey_name))
+        .find(|value| is_product_code_like(value));
+
+    let Some(uninstall_code) = uninstall_code else {
+        return Ok(None);
+    };
+
+    let mut cmd = Command::new("msiexec");
+    cmd.arg("/x").arg(uninstall_code);
+    match request.mode {
+        InstallerMode::Interactive => {}
+        InstallerMode::SilentWithProgress => {
+            cmd.arg("/passive").arg("/norestart");
+        }
+        InstallerMode::Silent => {
+            cmd.arg("/quiet").arg("/norestart");
+        }
+    }
+    if let Some(log_path) = &request.log_path {
+        cmd.arg("/log").arg(log_path);
+    }
+
+    let status = cmd.status().context("failed to run msiexec uninstall")?;
+    Ok(Some(status.code().unwrap_or(-1)))
+}
+
+#[cfg(windows)]
+fn uninstall_portable(installed: &ListMatch, request: &UninstallRequest) -> Result<i32> {
+    let Some(location) = installed.install_location.as_deref() else {
+        if request.force {
+            return Ok(0);
+        }
+        bail!(
+            "Portable package '{}' does not expose an install location.",
+            installed.name
+        );
+    };
+
+    if request.preserve {
+        return Ok(0);
+    }
+
+    let path = Path::new(location);
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+        return Ok(0);
+    }
+    if path.is_file() {
+        fs::remove_file(path)?;
+        return Ok(0);
+    }
+    if request.force {
+        return Ok(0);
+    }
+
+    bail!("Portable package location not found: {location}")
+}
+
+#[cfg(windows)]
+fn is_product_code_like(value: &str) -> bool {
+    value.starts_with('{') && value.ends_with('}')
 }
 
 #[cfg(not(windows))]
-fn uninstall_package(_package_id: &str, _silent: bool) -> Result<i32> {
+fn uninstall_package(_installed: &ListMatch, _request: &UninstallRequest) -> Result<i32> {
     bail!("Uninstalling packages is only supported on Windows")
 }
 
@@ -4268,6 +5140,7 @@ mod tests {
                 release_notes: None,
                 release_notes_url: None,
                 tags: vec!["utility".to_string()],
+                agreements: Vec::new(),
                 package_dependencies: vec!["Microsoft.VCRedist.2015+.x64".to_string()],
                 documentation: vec![Documentation {
                     label: Some("Docs".to_string()),
@@ -4284,6 +5157,10 @@ mod tests {
                     release_date: None,
                     package_family_name: None,
                     upgrade_code: None,
+                    switches: InstallerSwitches {
+                        silent: Some("/quiet".to_string()),
+                        ..InstallerSwitches::default()
+                    },
                     commands: vec!["testpkg".to_string()],
                     package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
                 }],
@@ -4299,6 +5176,10 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                switches: InstallerSwitches {
+                    silent: Some("/quiet".to_string()),
+                    ..InstallerSwitches::default()
+                },
                 commands: vec!["testpkg".to_string()],
                 package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
             }),
@@ -4326,6 +5207,10 @@ mod tests {
             Some("testpkg")
         );
         assert_eq!(
+            document["SelectedInstaller"]["InstallerSwitches"]["Silent"].as_str(),
+            Some("/quiet")
+        );
+        assert_eq!(
             document["CachedFiles"][0].as_str(),
             Some(r"C:\temp\cache\Test.Package.yaml")
         );
@@ -4349,6 +5234,239 @@ mod tests {
         assert_eq!(manifest.version, "1.7.32");
         assert_eq!(manifest.name, "MSIX SDK");
         assert!(!manifest.installers.is_empty());
+    }
+
+    #[test]
+    fn parses_installer_switches_from_yaml_manifest() {
+        let yaml = r#"
+PackageIdentifier: Test.Package
+PackageVersion: 1.2.3
+PackageName: Test Package
+InstallerSwitches:
+  SilentWithProgress: /SILENT
+Installers:
+  - Architecture: x64
+    InstallerType: inno
+    InstallerUrl: https://example.test/Test.Package.exe
+    InstallerSha256: ABC123
+    InstallerSwitches:
+      Silent: /VERYSILENT
+      Interactive: /HELP
+"#;
+
+        let manifest = parse_yaml_manifest(yaml.as_bytes()).expect("manifest");
+        let installer = &manifest.installers[0];
+
+        assert_eq!(
+            installer.switches.silent_with_progress.as_deref(),
+            Some("/SILENT")
+        );
+        assert_eq!(installer.switches.silent.as_deref(), Some("/VERYSILENT"));
+        assert_eq!(installer.switches.interactive.as_deref(), Some("/HELP"));
+    }
+
+    #[test]
+    fn installer_switch_arguments_prefer_manifest_switches() {
+        let installer = Installer {
+            architecture: None,
+            installer_type: Some("inno".to_string()),
+            url: None,
+            sha256: None,
+            product_code: None,
+            locale: None,
+            scope: None,
+            release_date: None,
+            package_family_name: None,
+            upgrade_code: None,
+            switches: InstallerSwitches {
+                silent: Some("/mysilent".to_string()),
+                silent_with_progress: Some("/mysilentwithprogress".to_string()),
+                interactive: Some("/myinteractive".to_string()),
+                ..InstallerSwitches::default()
+            },
+            commands: Vec::new(),
+            package_dependencies: Vec::new(),
+        };
+        let manifest = Manifest {
+            id: "Test.Package".to_string(),
+            name: "Test Package".to_string(),
+            version: "1.0.0".to_string(),
+            channel: String::new(),
+            publisher: None,
+            description: None,
+            moniker: None,
+            package_url: None,
+            publisher_url: None,
+            publisher_support_url: None,
+            license: None,
+            license_url: None,
+            privacy_url: None,
+            author: None,
+            copyright: None,
+            copyright_url: None,
+            release_notes: None,
+            release_notes_url: None,
+            tags: Vec::new(),
+            agreements: Vec::new(),
+            package_dependencies: Vec::new(),
+            documentation: Vec::new(),
+            installers: Vec::new(),
+        };
+
+        let mut silent_request = InstallRequest::new(PackageQuery::default());
+        silent_request.mode = InstallerMode::Silent;
+        let mut progress_request = InstallRequest::new(PackageQuery::default());
+        progress_request.mode = InstallerMode::SilentWithProgress;
+        let mut interactive_request = InstallRequest::new(PackageQuery::default());
+        interactive_request.mode = InstallerMode::Interactive;
+        assert_eq!(
+            installer_command_arguments("inno", &silent_request, &manifest, Path::new("installer.exe"), &installer),
+            vec!["/mysilent".to_string()]
+        );
+        assert_eq!(
+            installer_command_arguments("inno", &progress_request, &manifest, Path::new("installer.exe"), &installer),
+            vec!["/mysilentwithprogress".to_string()]
+        );
+        assert_eq!(
+            installer_command_arguments("inno", &interactive_request, &manifest, Path::new("installer.exe"), &installer),
+            vec!["/myinteractive".to_string()]
+        );
+    }
+
+    #[test]
+    fn installer_switch_arguments_use_inno_defaults_without_manifest_switches() {
+        let installer = Installer {
+            architecture: None,
+            installer_type: Some("inno".to_string()),
+            url: None,
+            sha256: None,
+            product_code: None,
+            locale: None,
+            scope: None,
+            release_date: None,
+            package_family_name: None,
+            upgrade_code: None,
+            switches: InstallerSwitches::default(),
+            commands: Vec::new(),
+            package_dependencies: Vec::new(),
+        };
+        let manifest = Manifest {
+            id: "Test.Package".to_string(),
+            name: "Test Package".to_string(),
+            version: "1.0.0".to_string(),
+            channel: String::new(),
+            publisher: None,
+            description: None,
+            moniker: None,
+            package_url: None,
+            publisher_url: None,
+            publisher_support_url: None,
+            license: None,
+            license_url: None,
+            privacy_url: None,
+            author: None,
+            copyright: None,
+            copyright_url: None,
+            release_notes: None,
+            release_notes_url: None,
+            tags: Vec::new(),
+            agreements: Vec::new(),
+            package_dependencies: Vec::new(),
+            documentation: Vec::new(),
+            installers: Vec::new(),
+        };
+        let mut progress_request = InstallRequest::new(PackageQuery::default());
+        progress_request.mode = InstallerMode::SilentWithProgress;
+        let mut silent_request = InstallRequest::new(PackageQuery::default());
+        silent_request.mode = InstallerMode::Silent;
+
+        assert_eq!(
+            installer_command_arguments("inno", &progress_request, &manifest, Path::new("installer.exe"), &installer),
+            vec![
+                "/SP-".to_string(),
+                "/SILENT".to_string(),
+                "/SUPPRESSMSGBOXES".to_string(),
+                "/NORESTART".to_string()
+            ]
+        );
+        assert_eq!(
+            installer_command_arguments("inno", &silent_request, &manifest, Path::new("installer.exe"), &installer),
+            vec![
+                "/SP-".to_string(),
+                "/VERYSILENT".to_string(),
+                "/SUPPRESSMSGBOXES".to_string(),
+                "/NORESTART".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn installer_command_arguments_append_manifest_and_cli_switches() {
+        let installer = Installer {
+            architecture: None,
+            installer_type: Some("msi".to_string()),
+            url: None,
+            sha256: None,
+            product_code: None,
+            locale: None,
+            scope: None,
+            release_date: None,
+            package_family_name: None,
+            upgrade_code: None,
+            switches: InstallerSwitches {
+                custom: Some("ADDLOCAL=Core".to_string()),
+                log: Some("/log \"<LOGPATH>\"".to_string()),
+                install_location: Some("TARGETDIR=\"<INSTALLPATH>\"".to_string()),
+                ..InstallerSwitches::default()
+            },
+            commands: Vec::new(),
+            package_dependencies: Vec::new(),
+        };
+        let manifest = Manifest {
+            id: "ShareX.ShareX".to_string(),
+            name: "ShareX".to_string(),
+            version: "19.0.2".to_string(),
+            channel: String::new(),
+            publisher: None,
+            description: None,
+            moniker: None,
+            package_url: None,
+            publisher_url: None,
+            publisher_support_url: None,
+            license: None,
+            license_url: None,
+            privacy_url: None,
+            author: None,
+            copyright: None,
+            copyright_url: None,
+            release_notes: None,
+            release_notes_url: None,
+            tags: Vec::new(),
+            agreements: Vec::new(),
+            package_dependencies: Vec::new(),
+            documentation: Vec::new(),
+            installers: Vec::new(),
+        };
+        let mut request = InstallRequest::new(PackageQuery::default());
+        request.mode = InstallerMode::Silent;
+        request.log_path = Some(PathBuf::from(r"C:\temp\winget.log"));
+        request.custom = Some("REBOOT=ReallySuppress".to_string());
+        request.install_location = Some(r"C:\Apps\ShareX".to_string());
+
+        assert_eq!(
+            installer_command_arguments("msi", &request, &manifest, Path::new(r"C:\temp\ShareX.msi"), &installer),
+            vec![
+                "/i".to_string(),
+                r"C:\temp\ShareX.msi".to_string(),
+                "/quiet".to_string(),
+                "/norestart".to_string(),
+                "/log".to_string(),
+                r"C:\temp\winget.log".to_string(),
+                "ADDLOCAL=Core".to_string(),
+                "REBOOT=ReallySuppress".to_string(),
+                r"TARGETDIR=C:\Apps\ShareX".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -4478,6 +5596,7 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
@@ -4492,6 +5611,7 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                switches: InstallerSwitches::default(),
                 commands: vec!["demo".to_string()],
                 package_dependencies: Vec::new(),
             },
@@ -4523,6 +5643,7 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
@@ -4537,6 +5658,7 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
@@ -4939,5 +6061,77 @@ mod tests {
 
         assert!(list_sort_weight(&main) < list_sort_weight(&sparse));
         assert!(list_sort_weight(&sparse) < list_sort_weight(&extension));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn arp_subkey_name_extracts_registry_subkey() {
+        assert_eq!(
+            Some("ShareX"),
+            arp_subkey_name(r"ARP\Machine\X64\ShareX")
+        );
+        assert_eq!(None, arp_subkey_name(r"MSIX\ShareX_19.0.2_x64__name"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn registry_entry_matching_prefers_local_identity_over_correlated_id() {
+        let installed = ListMatch {
+            name: "ShareX".to_string(),
+            id: "ShareX.ShareX".to_string(),
+            local_id: r"ARP\Machine\X64\ShareX".to_string(),
+            installed_version: "19.0.2".to_string(),
+            available_version: None,
+            source_name: Some("winget".to_string()),
+            publisher: Some("ShareX Team".to_string()),
+            scope: Some("Machine".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: Some(r"C:\Program Files\ShareX".to_string()),
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+
+        assert!(registry_entry_matches_installed_package(
+            "ShareX",
+            "ShareX",
+            None,
+            &installed
+        ));
+        assert!(!registry_entry_matches_installed_package(
+            "ShareX.ShareX",
+            "ShareX.ShareX",
+            None,
+            &installed
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn build_uninstall_command_only_appends_silent_flag_when_needed() {
+        assert_eq!(
+            r#""C:\Program Files\ShareX\unins000.exe" /S"#,
+            build_uninstall_command(
+                r#""C:\Program Files\ShareX\unins000.exe""#,
+                true,
+                false
+            )
+        );
+        assert_eq!(
+            r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#,
+            build_uninstall_command(
+                r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#,
+                true,
+                false
+            )
+        );
+        assert_eq!(
+            r#""C:\Program Files\ShareX\unins000.exe""#,
+            build_uninstall_command(
+                r#""C:\Program Files\ShareX\unins000.exe""#,
+                false,
+                false
+            )
+        );
     }
 }

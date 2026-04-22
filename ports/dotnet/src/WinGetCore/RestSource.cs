@@ -277,8 +277,32 @@ internal static class RestSource
             return v.EnumerateArray().Select(x => x.GetString() ?? "").Where(s => s != "").ToList();
         }
 
+        InstallerSwitches GetSwitches(JsonElement el)
+        {
+            if (!el.TryGetProperty("InstallerSwitches", out var switches) && !el.TryGetProperty("Switches", out switches))
+                return new InstallerSwitches();
+            if (switches.ValueKind != JsonValueKind.Object)
+                return new InstallerSwitches();
+
+            string? GetSwitch(string name) =>
+                switches.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString()
+                    : null;
+
+            return new InstallerSwitches
+            {
+                Silent = GetSwitch("Silent"),
+                SilentWithProgress = GetSwitch("SilentWithProgress"),
+                Interactive = GetSwitch("Interactive"),
+                Custom = GetSwitch("Custom"),
+                Log = GetSwitch("Log"),
+                InstallLocation = GetSwitch("InstallLocation"),
+            };
+        }
+
         var installers = new List<Installer>();
         var installersSource = versionData ?? data;
+        var defaultSwitches = GetSwitches(installersSource);
         if (installersSource.TryGetProperty("Installers", out var instArr) && instArr.ValueKind == JsonValueKind.Array)
         {
             foreach (var inst in instArr.EnumerateArray())
@@ -295,6 +319,7 @@ internal static class RestSource
                     ReleaseDate = GetOptStr(inst, "ReleaseDate"),
                     PackageFamilyName = GetOptStr(inst, "PackageFamilyName"),
                     UpgradeCode = GetOptStr(inst, "UpgradeCode"),
+                    Switches = GetSwitches(inst).MergeWith(defaultSwitches),
                     Commands = GetStrArray(inst, "Commands"),
                     PackageDependencies = GetStrArray(inst, "PackageDependencies"),
                 });
@@ -309,6 +334,20 @@ internal static class RestSource
                 var url = GetOptStr(doc, "DocumentUrl");
                 if (url is not null)
                     docs.Add(new Documentation { Label = GetOptStr(doc, "DocumentLabel"), Url = url });
+            }
+        }
+
+        var agreements = new List<PackageAgreement>();
+        if (defaultLocale.TryGetProperty("Agreements", out var agreementsArr) && agreementsArr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var agreement in agreementsArr.EnumerateArray())
+            {
+                agreements.Add(new PackageAgreement
+                {
+                    Label = GetOptStr(agreement, "AgreementLabel"),
+                    Text = GetOptStr(agreement, "Agreement"),
+                    Url = GetOptStr(agreement, "AgreementUrl"),
+                });
             }
         }
 
@@ -333,6 +372,7 @@ internal static class RestSource
             ReleaseNotes = GetOptStr(defaultLocale, "ReleaseNotes"),
             ReleaseNotesUrl = GetOptStr(defaultLocale, "ReleaseNotesUrl"),
             Tags = GetStrArray(defaultLocale, "Tags"),
+            Agreements = agreements,
             Documentation = docs,
             Installers = installers,
         };

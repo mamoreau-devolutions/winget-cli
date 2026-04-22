@@ -62,6 +62,8 @@ public record ListQuery
     public string? Moniker { get; init; }
     public string? Tag { get; init; }
     public string? Command { get; init; }
+    public string? ProductCode { get; init; }
+    public string? Version { get; init; }
     public string? Source { get; init; }
     public int? Count { get; init; }
     public bool Exact { get; init; }
@@ -126,6 +128,13 @@ public record Documentation
     public required string Url { get; init; }
 }
 
+public record PackageAgreement
+{
+    public string? Label { get; init; }
+    public string? Text { get; init; }
+    public string? Url { get; init; }
+}
+
 public record Installer
 {
     public string? Architecture { get; init; }
@@ -138,8 +147,44 @@ public record Installer
     public string? ReleaseDate { get; init; }
     public string? PackageFamilyName { get; init; }
     public string? UpgradeCode { get; init; }
+    public InstallerSwitches Switches { get; init; } = new();
     public List<string> Commands { get; init; } = [];
     public List<string> PackageDependencies { get; init; } = [];
+}
+
+public record InstallerSwitches
+{
+    public string? Silent { get; init; }
+    public string? SilentWithProgress { get; init; }
+    public string? Interactive { get; init; }
+    public string? Custom { get; init; }
+    public string? Log { get; init; }
+    public string? InstallLocation { get; init; }
+
+    public InstallerSwitches MergeWith(InstallerSwitches fallback) => new()
+    {
+        Silent = Silent ?? fallback.Silent,
+        SilentWithProgress = SilentWithProgress ?? fallback.SilentWithProgress,
+        Interactive = Interactive ?? fallback.Interactive,
+        Custom = Custom ?? fallback.Custom,
+        Log = Log ?? fallback.Log,
+        InstallLocation = InstallLocation ?? fallback.InstallLocation,
+    };
+
+    public bool IsEmpty() =>
+        string.IsNullOrWhiteSpace(Silent) &&
+        string.IsNullOrWhiteSpace(SilentWithProgress) &&
+        string.IsNullOrWhiteSpace(Interactive) &&
+        string.IsNullOrWhiteSpace(Custom) &&
+        string.IsNullOrWhiteSpace(Log) &&
+        string.IsNullOrWhiteSpace(InstallLocation);
+}
+
+public enum InstallerMode
+{
+    Interactive,
+    SilentWithProgress,
+    Silent,
 }
 
 public record Manifest
@@ -163,9 +208,40 @@ public record Manifest
     public string? ReleaseNotes { get; init; }
     public string? ReleaseNotesUrl { get; init; }
     public List<string> Tags { get; init; } = [];
+    public List<PackageAgreement> Agreements { get; init; } = [];
     public List<string> PackageDependencies { get; init; } = [];
     public List<Documentation> Documentation { get; init; } = [];
     public List<Installer> Installers { get; init; } = [];
+}
+
+public record InstallRequest
+{
+    public required PackageQuery Query { get; init; }
+    public string? ManifestPath { get; init; }
+    public InstallerMode Mode { get; init; } = InstallerMode.SilentWithProgress;
+    public string? LogPath { get; init; }
+    public string? Custom { get; init; }
+    public string? Override { get; init; }
+    public string? InstallLocation { get; init; }
+    public bool SkipDependencies { get; init; }
+    public bool DependenciesOnly { get; init; }
+    public bool AcceptPackageAgreements { get; init; }
+    public bool Force { get; init; }
+    public string? Rename { get; init; }
+    public bool UninstallPrevious { get; init; }
+}
+
+public record UninstallRequest
+{
+    public required PackageQuery Query { get; init; }
+    public string? ManifestPath { get; init; }
+    public string? ProductCode { get; init; }
+    public InstallerMode Mode { get; init; } = InstallerMode.SilentWithProgress;
+    public bool AllVersions { get; init; }
+    public bool Force { get; init; }
+    public bool Purge { get; init; }
+    public bool Preserve { get; init; }
+    public string? LogPath { get; init; }
 }
 
 public record ShowResult
@@ -286,6 +362,7 @@ file static class StructuredOutput
             ["PackageName"] = manifest.Name,
             ["PackageVersion"] = manifest.Version,
             ["Tags"] = manifest.Tags,
+            ["Agreements"] = manifest.Agreements.Select(AgreementDocument).ToList(),
             ["Documentations"] = manifest.Documentation.Select(DocumentationDocument).ToList(),
             ["Installers"] = manifest.Installers.Select(InstallerDocument).ToList(),
         };
@@ -319,6 +396,15 @@ file static class StructuredOutput
         return document;
     }
 
+    public static Dictionary<string, object?> AgreementDocument(PackageAgreement agreement)
+    {
+        var document = new Dictionary<string, object?>();
+        AddString(document, "AgreementLabel", agreement.Label);
+        AddString(document, "Agreement", agreement.Text);
+        AddString(document, "AgreementUrl", agreement.Url);
+        return document;
+    }
+
     public static Dictionary<string, object?> InstallerDocument(Installer installer)
     {
         var document = new Dictionary<string, object?>();
@@ -336,6 +422,20 @@ file static class StructuredOutput
             document["Commands"] = installer.Commands;
         if (installer.PackageDependencies.Count > 0)
             document["Dependencies"] = PackageDependenciesDocument(installer.PackageDependencies);
+        if (!installer.Switches.IsEmpty())
+            document["InstallerSwitches"] = InstallerSwitchesDocument(installer.Switches);
+        return document;
+    }
+
+    public static Dictionary<string, object?> InstallerSwitchesDocument(InstallerSwitches switches)
+    {
+        var document = new Dictionary<string, object?>();
+        AddString(document, "Silent", switches.Silent);
+        AddString(document, "SilentWithProgress", switches.SilentWithProgress);
+        AddString(document, "Interactive", switches.Interactive);
+        AddString(document, "Custom", switches.Custom);
+        AddString(document, "Log", switches.Log);
+        AddString(document, "InstallLocation", switches.InstallLocation);
         return document;
     }
 
