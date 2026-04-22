@@ -73,16 +73,19 @@ internal static class PreIndexedSource
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
+            var rowId = reader.GetInt64(0);
+            var idVal = reader.GetString(1);
+            var nameVal = reader.GetString(2);
+            var monikerVal = reader.IsDBNull(3) ? null : reader.GetString(3);
             rows.Add(new V2MatchRow
             {
-                PackageRowId = reader.GetInt64(0),
-                Id = reader.GetString(1),
-                Name = reader.GetString(2),
-                Moniker = reader.IsDBNull(3) ? null : reader.GetString(3),
+                PackageRowId = rowId,
+                Id = idVal,
+                Name = nameVal,
+                Moniker = monikerVal,
                 Version = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 PackageHash = reader.IsDBNull(5) ? "" : HexString(reader, 5),
-                MatchCriteria = DetermineMatchCriteria(query, reader.GetString(1), reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3))
+                MatchCriteria = DetermineMatchCriteriaV2(conn, query, idVal, nameVal, monikerVal, rowId, semantics)
             });
         }
 
@@ -117,17 +120,20 @@ internal static class PreIndexedSource
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
+            var manifestRowId = reader.GetInt64(0);
+            var idVal = reader.GetString(4);
+            var nameVal = reader.GetString(5);
+            var monikerVal = reader.IsDBNull(6) ? null : reader.GetString(6);
             rawRows.Add(new V1MatchRow
             {
-                ManifestRowId = reader.GetInt64(0),
+                ManifestRowId = manifestRowId,
                 PackageRowId = reader.GetInt64(1),
                 Version = reader.GetString(2),
                 Channel = reader.GetString(3),
-                Id = reader.GetString(4),
-                Name = reader.GetString(5),
-                Moniker = reader.IsDBNull(6) ? null : reader.GetString(6),
-                MatchCriteria = DetermineMatchCriteria(query, reader.GetString(4), reader.GetString(5),
-                    reader.IsDBNull(6) ? null : reader.GetString(6))
+                Id = idVal,
+                Name = nameVal,
+                Moniker = monikerVal,
+                MatchCriteria = DetermineMatchCriteriaV1(conn, query, idVal, nameVal, monikerVal, manifestRowId, semantics)
             });
         }
 
@@ -462,25 +468,77 @@ internal static class PreIndexedSource
         return value?.ToString()?.ToLowerInvariant() ?? "";
     }
 
-    private static string? DetermineMatchCriteria(PackageQuery query, string id, string name, string? moniker)
+    private static string? DetermineMatchCriteria(SqliteConnection conn, PackageQuery query,
+        string id, string name, string? moniker, long ownerRowId,
+        string tagTable, string tagMapTable, string tagColumn, string ownerColumn,
+        string cmdTable, string cmdMapTable, string cmdColumn,
+        SearchSemantics semantics)
     {
-        // If searching by tag or command, report that
         if (query.Tag is not null) return $"Tag: {query.Tag}";
         if (query.Command is not null) return $"Command: {query.Command}";
-
-        // If the plain query matched name or id exactly, no special reporting needed
+        if (query.Moniker is not null) return $"Moniker: {moniker ?? query.Moniker}";
+        if (semantics == SearchSemantics.Single) return null;
         if (query.Query is null) return null;
 
         var q = query.Query;
-        if (id.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-            name.Contains(q, StringComparison.OrdinalIgnoreCase))
+        bool exact = query.Exact;
+        if (MatchesText(id, q, exact) || MatchesText(name, q, exact))
             return null;
 
-        if (moniker?.Contains(q, StringComparison.OrdinalIgnoreCase) == true)
+        if (moniker is not null && MatchesText(moniker, q, exact))
             return $"Moniker: {moniker}";
+
+        var tag = FindMappedValue(conn, tagTable, tagMapTable, tagColumn, ownerColumn, ownerRowId, q, exact);
+        if (tag is not null) return $"Tag: {tag}";
+
+        var cmd = FindMappedValue(conn, cmdTable, cmdMapTable, cmdColumn, ownerColumn, ownerRowId, q, exact);
+        if (cmd is not null) return $"Command: {cmd}";
 
         return null;
     }
+
+    private static bool MatchesText(string text, string query, bool exact)
+    {
+        return exact
+            ? text.Equals(query, StringComparison.OrdinalIgnoreCase)
+            : text.Contains(query, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? FindMappedValue(SqliteConnection conn, string table, string mapTable,
+        string valueName, string ownerColumn, long ownerRowId, string query, bool exact)
+    {
+        var likeParam = exact ? query : $"%{query}%";
+        var sql = $"SELECT {table}.{valueName} FROM {mapTable} " +
+                  $"JOIN {table} ON {mapTable}.{valueName} = {table}.rowid " +
+                  $"WHERE {mapTable}.{ownerColumn} = @owner AND {table}.{valueName} LIKE @q";
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("@owner", ownerRowId);
+        cmd.Parameters.AddWithValue("@q", likeParam);
+        using var reader = cmd.ExecuteReader();
+        string? best = null;
+        while (reader.Read())
+        {
+            var val = reader.GetString(0);
+            if (best is null || val.Length < best.Length) best = val;
+        }
+        return best;
+    }
+
+    // Convenience overloads
+    internal static string? DetermineMatchCriteriaV2(SqliteConnection conn, PackageQuery query,
+        string id, string name, string? moniker, long packageRowId, SearchSemantics semantics) =>
+        DetermineMatchCriteria(conn, query, id, name, moniker, packageRowId,
+            "tags2", "tags2_map", "tag", "package",
+            "commands2", "commands2_map", "command",
+            semantics);
+
+    internal static string? DetermineMatchCriteriaV1(SqliteConnection conn, PackageQuery query,
+        string id, string name, string? moniker, long manifestRowId, SearchSemantics semantics) =>
+        DetermineMatchCriteria(conn, query, id, name, moniker, manifestRowId,
+            "tags", "tags_map", "tag", "manifest",
+            "commands", "commands_map", "command",
+            semantics);
 
     private static int MaxResults(PackageQuery query, SearchSemantics semantics)
     {

@@ -744,23 +744,54 @@ public class Repository : IDisposable
 
     private static SearchMatch? CorrelateInstalledPackage(InstalledPackage pkg, List<SearchMatch> candidates, bool loose)
     {
-        // Try exact id match first
-        var exact = candidates.FirstOrDefault(c =>
-            c.Id.Equals(pkg.LocalId, StringComparison.OrdinalIgnoreCase));
-        if (exact is not null) return exact;
+        if (pkg.LocalId.StartsWith(@"MSIX\", StringComparison.OrdinalIgnoreCase))
+            return null;
 
-        // Try name match
-        var nameMatch = candidates.FirstOrDefault(c =>
-            c.Name.Equals(pkg.Name, StringComparison.OrdinalIgnoreCase));
-        if (nameMatch is not null) return nameMatch;
+        var installedName = NormalizeCorrelationName(pkg.Name);
+        var candidateNames = CorrelationNameCandidates(pkg.Name);
 
-        if (!loose) return null;
+        SearchMatch? best = null;
+        int bestScore = 0;
+        foreach (var candidate in candidates)
+        {
+            var candidateNorm = NormalizeCorrelationName(candidate.Name);
+            int score;
+            if (candidate.Id.Equals(pkg.LocalId, StringComparison.OrdinalIgnoreCase))
+                score = 1000;
+            else if (candidateNames.Any(n => NormalizeCorrelationName(n).Equals(candidateNorm, StringComparison.OrdinalIgnoreCase)))
+                score = 900;
+            else if (loose && candidateNorm.Length >= 6 && installedName.Contains(candidateNorm, StringComparison.OrdinalIgnoreCase))
+                score = 700;
+            else
+                score = 0;
 
-        // Try substring
-        return candidates.FirstOrDefault(c =>
-            c.Id.Contains(pkg.LocalId, StringComparison.OrdinalIgnoreCase) ||
-            c.Name.Contains(pkg.Name, StringComparison.OrdinalIgnoreCase));
+            if (score > bestScore) { bestScore = score; best = candidate; }
+        }
+        return best;
     }
+
+    private static List<string> CorrelationNameCandidates(string name)
+    {
+        var candidates = new List<string> { name.Trim() };
+        var trimmed = name.Trim();
+        var parenIdx = trimmed.IndexOf(" (");
+        if (parenIdx >= 0) trimmed = trimmed[..parenIdx];
+
+        var words = new List<string>();
+        foreach (var token in trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var lower = token.Trim('(', ')').ToLowerInvariant();
+            if (words.Count > 0 &&
+                (lower is "x64" or "x86" or "arm64" || token.Any(char.IsAsciiDigit)))
+                break;
+            words.Add(token);
+        }
+        if (words.Count > 0) candidates.Add(string.Join(' ', words));
+        return candidates.Distinct().ToList();
+    }
+
+    private static string NormalizeCorrelationName(string value) =>
+        new(value.Where(c => char.IsAsciiLetterOrDigit(c)).Select(char.ToLowerInvariant).ToArray());
 
     private static bool ListPackageMatches(InstalledPackage pkg, ListQuery query)
     {
@@ -796,24 +827,41 @@ public class Repository : IDisposable
         return RestSource.CompareVersionStrings(availableVersion, pkg.InstalledVersion) > 0;
     }
 
-    private static int ListSortWeight(InstalledPackage pkg) => pkg.Correlated is not null ? 0 : 1;
-
-    private static ListMatch ListMatchFromInstalled(InstalledPackage pkg) => new()
+    private static int ListSortWeight(InstalledPackage pkg)
     {
-        Name = pkg.Correlated?.Name ?? pkg.Name,
-        Id = pkg.Correlated?.Id ?? pkg.LocalId,
-        LocalId = pkg.LocalId,
-        InstalledVersion = pkg.InstalledVersion,
-        AvailableVersion = pkg.Correlated?.Version,
-        SourceName = pkg.Correlated?.SourceName,
-        Publisher = pkg.Publisher,
-        Scope = pkg.Scope,
-        InstallerCategory = pkg.InstallerCategory,
-        InstallLocation = pkg.InstallLocation,
-        PackageFamilyNames = pkg.PackageFamilyNames,
-        ProductCodes = pkg.ProductCodes,
-        UpgradeCodes = pkg.UpgradeCodes,
-    };
+        if (pkg.LocalId.StartsWith(@"ARP\", StringComparison.OrdinalIgnoreCase))
+            return 0;
+        if (pkg.Name.Contains(".SparseApp") || pkg.LocalId.Contains(".SparseApp_"))
+            return 1;
+        return 2;
+    }
+
+    private static ListMatch ListMatchFromInstalled(InstalledPackage pkg)
+    {
+        string? availableVersion = null;
+        if (pkg.Correlated?.Version is string av)
+        {
+            if (string.IsNullOrEmpty(pkg.InstalledVersion) ||
+                RestSource.CompareVersionStrings(av, pkg.InstalledVersion) > 0)
+                availableVersion = av;
+        }
+        return new()
+        {
+            Name = pkg.Name,
+            Id = pkg.Correlated?.Id ?? pkg.LocalId,
+            LocalId = pkg.LocalId,
+            InstalledVersion = pkg.InstalledVersion,
+            AvailableVersion = availableVersion,
+            SourceName = pkg.Correlated?.SourceName,
+            Publisher = pkg.Publisher,
+            Scope = pkg.Scope,
+            InstallerCategory = pkg.InstallerCategory,
+            InstallLocation = pkg.InstallLocation,
+            PackageFamilyNames = pkg.PackageFamilyNames,
+            ProductCodes = pkg.ProductCodes,
+            UpgradeCodes = pkg.UpgradeCodes,
+        };
+    }
 
     private static bool ListQueryNeedsAvailableLookup(ListQuery query)
         => query.Query is not null || query.Id is not null || query.Name is not null ||

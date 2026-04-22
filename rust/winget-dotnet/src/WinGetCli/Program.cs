@@ -644,20 +644,15 @@ static void PrintSearch(SearchResponse result)
     if (result.Matches.Count == 0) { Console.WriteLine("No package matched the supplied query."); return; }
 
     bool showMatch = result.Matches.Any(m => m.MatchCriteria is not null);
-    if (showMatch)
-    {
-        Console.WriteLine($"{"Name",-32} {"Id",-40} {"Version",-18} {"Match",-24} Source");
-        foreach (var m in result.Matches)
-            Console.WriteLine($"{Trunc(m.Name, 32),-32} {Trunc(m.Id, 40),-40} {Trunc(m.Version ?? "?", 18),-18} {Trunc(m.MatchCriteria ?? "", 24),-24} {m.SourceName}");
-    }
-    else
-    {
-        Console.WriteLine($"{"Name",-32} {"Id",-40} {"Version",-18} Source");
-        foreach (var m in result.Matches)
-            Console.WriteLine($"{Trunc(m.Name, 32),-32} {Trunc(m.Id, 40),-40} {Trunc(m.Version ?? "?", 18),-18} {m.SourceName}");
-    }
+    string[] headers = showMatch
+        ? ["Name", "Id", "Version", "Match", "Source"]
+        : ["Name", "Id", "Version", "Source"];
+    var rows = result.Matches.Select(m => showMatch
+        ? new[] { m.Name, m.Id, m.Version ?? "Unknown", m.MatchCriteria ?? "", m.SourceName }
+        : new[] { m.Name, m.Id, m.Version ?? "Unknown", m.SourceName }).ToList();
+    PrintTable(headers, rows);
 
-    if (result.Truncated) Console.WriteLine($"<truncated>");
+    if (result.Truncated) Console.WriteLine($"<additional entries truncated due to result limit>");
 }
 
 static void PrintVersions(VersionsResult result)
@@ -704,6 +699,13 @@ static void PrintShow(ShowResult result)
         foreach (var doc in m.Documentation)
             Console.WriteLine($"  {doc.Label ?? "Link"}: {doc.Url}");
     }
+
+    if (result.Manifest.PackageDependencies.Count > 0)
+    {
+        Console.Write("Dependencies:");
+        Console.WriteLine($" {string.Join(", ", result.Manifest.PackageDependencies)}");
+    }
+
     if (m.Tags.Count > 0) { Console.WriteLine("Tags:"); foreach (var t in m.Tags) Console.WriteLine($"  {t}"); }
 
     if (result.SelectedInstaller is Installer inst)
@@ -718,35 +720,49 @@ static void PrintShow(ShowResult result)
         PrintOpt("  ProductCode", inst.ProductCode);
         PrintOpt("  ReleaseDate", inst.ReleaseDate);
     }
-
-    if (result.Manifest.PackageDependencies.Count > 0)
+    else if (m.Installers.Count > 0)
     {
-        Console.Write("Dependencies:");
-        Console.WriteLine($" {string.Join(", ", result.Manifest.PackageDependencies)}");
+        Console.WriteLine("Installer:");
+        Console.WriteLine("  No applicable installer found; see logs for more details.");
     }
 }
 
 static void PrintListResult(ListResponse result, bool details, bool upgrade)
 {
     PrintWarnings(result.Warnings);
-    if (result.Matches.Count == 0) { Console.WriteLine("No installed package found."); return; }
+    if (result.Matches.Count == 0) { Console.WriteLine("No installed package found matching input criteria."); return; }
 
-    if (upgrade)
+    if (details)
     {
-        Console.WriteLine($"{"Name",-30} {"Id",-30} {"Version",-24} {"Available",-24} Source");
-        Console.WriteLine(new string('-', 118));
-        foreach (var m in result.Matches)
-            Console.WriteLine($"{Trunc(m.Name, 30),-30} {Trunc(m.Id, 30),-30} {Trunc(m.InstalledVersion, 24),-24} {Trunc(m.AvailableVersion ?? "", 24),-24} {m.SourceName ?? ""}");
+        int total = result.Matches.Count;
+        for (int idx = 0; idx < total; idx++)
+        {
+            var m = result.Matches[idx];
+            if (total > 1)
+                Console.WriteLine($"({idx + 1}/{total}) {m.Name} [{m.Id}]");
+            else
+                Console.WriteLine($"{m.Name} [{m.Id}]");
+            PrintOpt("Version", m.InstalledVersion);
+            PrintOpt("Publisher", m.Publisher);
+            if (m.LocalId != m.Id) PrintOpt("Local Identifier", m.LocalId);
+            PrintOpt("Source", m.SourceName);
+            PrintOpt("Available", m.AvailableVersion);
+        }
     }
     else
     {
-        Console.WriteLine($"{"Name",-30} {"Id",-30} {"Version",-24} Source");
-        Console.WriteLine(new string('-', 94));
-        foreach (var m in result.Matches)
-            Console.WriteLine($"{Trunc(m.Name, 30),-30} {Trunc(m.Id, 30),-30} {Trunc(m.InstalledVersion, 24),-24} {m.SourceName ?? ""}");
+        bool showAvailable = result.Matches.Any(m => !string.IsNullOrEmpty(m.AvailableVersion));
+        string[] headers = showAvailable
+            ? ["Name", "Id", "Version", "Available", "Source"]
+            : ["Name", "Id", "Version", "Source"];
+        var rows = result.Matches.Select(m => showAvailable
+            ? new[] { m.Name, m.Id, m.InstalledVersion, m.AvailableVersion ?? "", m.SourceName ?? "" }
+            : new[] { m.Name, m.Id, m.InstalledVersion, m.SourceName ?? "" }).ToList();
+        PrintTable(headers, rows);
     }
 
-    if (result.Truncated) Console.WriteLine($"<truncated>");
+    if (result.Truncated) Console.WriteLine($"<additional entries truncated due to result limit>");
+    if (upgrade) Console.WriteLine($"{result.Matches.Count} upgrades available.");
 }
 
 static void PrintSources(List<SourceRecord> sources)
@@ -774,11 +790,20 @@ static void PrintErrorLookup(string input)
     }
 
     var lookup = LookupHresult(code);
-    Console.WriteLine($"0x{code:X8}");
     if (lookup is not null)
-        Console.WriteLine($"  {lookup.Value.Symbol}: {lookup.Value.Description}");
+    {
+        // APPINSTALLER codes (0x8A15xxxx): show symbol on same line
+        if ((code & 0xFFFF0000L) == unchecked((long)0x8A150000))
+            Console.WriteLine($"0x{code:x8} : {lookup.Value.Symbol}");
+        else
+            Console.WriteLine($"0x{code:x8}");
+        Console.WriteLine(lookup.Value.Description);
+    }
     else
+    {
+        Console.WriteLine($"0x{code:x8}");
         Console.WriteLine("  Unknown error code");
+    }
 }
 
 static (string Symbol, string Description)? LookupHresult(long code)
@@ -812,4 +837,74 @@ static (string Symbol, string Description)? LookupHresult(long code)
 
 static void PrintWarnings(List<string> warnings) { foreach (var w in warnings) Console.Error.WriteLine($"warning: {w}"); }
 static void PrintOpt(string label, string? value) { if (value is not null) Console.WriteLine($"{label}: {value}"); }
-static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
+static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "\u2026";
+
+static void PrintTable(string[] headers, List<string[]> rows)
+{
+    if (headers.Length == 0) return;
+    int cols = headers.Length;
+    var widths = headers.Select(h => h.Length).ToArray();
+    var hasData = new bool[cols];
+
+    foreach (var row in rows)
+        for (int i = 0; i < Math.Min(cols, row.Length); i++)
+            if (!string.IsNullOrEmpty(row[i]))
+            {
+                hasData[i] = true;
+                widths[i] = Math.Max(widths[i], row[i].Length);
+            }
+
+    for (int i = 0; i < cols; i++)
+        if (!hasData[i]) widths[i] = 0;
+
+    var spaceAfter = Enumerable.Repeat(true, cols).ToArray();
+    spaceAfter[^1] = false;
+    for (int i = cols - 1; i >= 1; i--)
+    {
+        if (widths[i] == 0) spaceAfter[i - 1] = false;
+        else break;
+    }
+
+    int totalWidth = widths.Zip(spaceAfter, (w, s) => w + (s ? 1 : 0)).Sum();
+    int consoleWidth = 120;
+    try { consoleWidth = Console.WindowWidth; } catch { }
+    if (totalWidth >= consoleWidth)
+    {
+        int extra = totalWidth - consoleWidth + 1;
+        while (extra > 0)
+        {
+            int target = 0;
+            for (int i = 1; i < cols; i++)
+                if (widths[i] > widths[target]) target = i;
+            if (widths[target] > 1) widths[target]--;
+            extra--;
+        }
+        totalWidth = Math.Max(0, consoleWidth - 1);
+    }
+
+    PrintTableLine(headers, widths, spaceAfter);
+    Console.WriteLine(new string('-', totalWidth));
+    foreach (var row in rows)
+        PrintTableLine(row, widths, spaceAfter);
+}
+
+static void PrintTableLine(string[] values, int[] widths, bool[] spaceAfter)
+{
+    var sb = new System.Text.StringBuilder();
+    for (int i = 0; i < Math.Min(values.Length, widths.Length); i++)
+    {
+        if (widths[i] == 0) continue;
+        var val = values[i] ?? "";
+        if (val.Length > widths[i])
+        {
+            sb.Append(Trunc(val, widths[i]));
+            if (spaceAfter[i]) sb.Append(' ');
+        }
+        else
+        {
+            sb.Append(val);
+            if (spaceAfter[i]) sb.Append(' ', widths[i] - val.Length + 1);
+        }
+    }
+    Console.WriteLine(sb.ToString().TrimEnd());
+}

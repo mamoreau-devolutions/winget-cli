@@ -52,6 +52,7 @@ internal static class InstalledPackages
 
         foreach (var arpPath in arpPaths)
         {
+            var effectiveArch = arpPath.Contains("WOW6432Node") ? "X86" : archLabel;
             try
             {
                 using var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(hive, view);
@@ -87,11 +88,11 @@ internal static class InstalledPackages
                         packages.Add(new InstalledPackage
                         {
                             Name = displayName,
-                            LocalId = subkeyName,
+                            LocalId = $@"ARP\{scopeLabel}\{effectiveArch}\{subkeyName}",
                             InstalledVersion = version,
                             Publisher = publisher,
                             Scope = scopeLabel,
-                            InstallerCategory = archLabel,
+                            InstallerCategory = effectiveArch,
                             InstallLocation = installLocation,
                             ProductCodes = productCodes,
                         });
@@ -151,7 +152,7 @@ internal static class InstalledPackages
                 packages.Add(new InstalledPackage
                 {
                     Name = string.IsNullOrEmpty(displayName) ? familyName : displayName,
-                    LocalId = familyName,
+                    LocalId = $@"MSIX\{familyName}",
                     InstalledVersion = parsed.Value.Version,
                     Publisher = string.IsNullOrEmpty(publisher) ? null : publisher,
                     Scope = scopeLabel,

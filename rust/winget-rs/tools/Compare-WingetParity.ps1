@@ -1,7 +1,11 @@
 param(
     [string]$RustWinget = (Join-Path $PSScriptRoot "..\target\debug\winget.exe"),
+    [string]$DotnetWinget = (Join-Path $PSScriptRoot "..\..\winget-dotnet\src\WinGetCli\bin\Debug\net9.0\winget-dotnet.exe"),
     [string]$SystemWinget = "winget",
-    [string[]]$Cases
+    [string[]]$Cases,
+    [switch]$NoDotnet,
+    [switch]$NoRust,
+    [switch]$NoSystem
 )
 
 $defaultCases = @(
@@ -14,16 +18,44 @@ $defaultCases = @(
         Args = @("search", "--tag", "terminal", "--count", "5")
     },
     @{
+        Name = "search-exact-id"
+        Args = @("search", "--id", "Microsoft.PowerToys", "--exact")
+    },
+    @{
+        Name = "search-by-name"
+        Args = @("search", "--name", "Remote Desktop Manager", "--count", "3")
+    },
+    @{
+        Name = "search-versions"
+        Args = @("search", "Microsoft.PowerToys", "--versions")
+    },
+    @{
         Name = "show-powertoys"
         Args = @("show", "Microsoft.PowerToys", "--installer-type", "exe", "--architecture", "x64", "--locale", "en-US")
+    },
+    @{
+        Name = "show-rdm"
+        Args = @("show", "Devolutions.RemoteDesktopManager")
+    },
+    @{
+        Name = "show-versions"
+        Args = @("show", "Microsoft.PowerToys", "--versions")
+    },
+    @{
+        Name = "show-exact-version"
+        Args = @("show", "Microsoft.PowerToys", "--version", "0.87.1")
+    },
+    @{
+        Name = "list-count"
+        Args = @("list", "--count", "5")
     },
     @{
         Name = "list-powertoys"
         Args = @("list", "Microsoft.PowerToys")
     },
     @{
-        Name = "list-lazygit-upgrade"
-        Args = @("list", "JesseDuffield.lazygit", "--upgrade-available")
+        Name = "list-upgrade-available"
+        Args = @("list", "--upgrade-available", "--count", "3")
     },
     @{
         Name = "upgrade-lazygit"
@@ -72,8 +104,13 @@ $defaultCases = @(
     }
 )
 
-if (-not (Test-Path $RustWinget)) {
-    throw "Rust winget binary not found at '$RustWinget'. Build it first with 'cargo build --manifest-path rust\winget-rs\Cargo.toml -p winget-cli'."
+if (-not $NoRust -and -not (Test-Path $RustWinget)) {
+    Write-Warning "Rust winget binary not found at '$RustWinget'. Use -NoRust to skip."
+    $NoRust = $true
+}
+if (-not $NoDotnet -and -not (Test-Path $DotnetWinget)) {
+    Write-Warning "Dotnet winget binary not found at '$DotnetWinget'. Use -NoDotnet to skip."
+    $NoDotnet = $true
 }
 
 function Invoke-WingetCapture {
@@ -144,9 +181,8 @@ function Write-CaseReport {
     param(
         [Parameter(Mandatory = $true)]
         [hashtable]$Case,
-        [Parameter(Mandatory = $true)]
         $RustResult,
-        [Parameter(Mandatory = $true)]
+        $DotnetResult,
         $SystemResult,
         [string]$CompareMode = "full"
     )
@@ -159,68 +195,124 @@ function Write-CaseReport {
             }
         }) -join ' '
 
-    if ($CompareMode -eq "exit-code-only") {
-        $sameOutput = ($RustResult.ExitCode -eq $SystemResult.ExitCode)
-    } else {
-        $sameOutput = ($RustResult.ExitCode -eq $SystemResult.ExitCode) -and
-            (@($RustResult.NormalizedLines) -join "`n") -eq (@($SystemResult.NormalizedLines) -join "`n")
+    # Collect all results that were run
+    $results = [ordered]@{}
+    if ($RustResult)   { $results["RUST"]   = $RustResult }
+    if ($DotnetResult) { $results["DOTNET"] = $DotnetResult }
+    if ($SystemResult) { $results["SYSTEM"] = $SystemResult }
+
+    if ($results.Count -lt 2) {
+        # Only one tool — just display it
+        $toolName = $results.Keys | Select-Object -First 1
+        $r = $results[$toolName]
+        Write-Host ("=" * 80)
+        Write-Host ("CASE   : {0}" -f $Case.Name)
+        Write-Host ("COMMAND: winget {0}" -f $commandText)
+        Write-Host ("STATUS : {0}-ONLY (exit={1})" -f $toolName, $r.ExitCode)
+        Write-Host "--- $toolName ---"
+        $r.NormalizedLines | ForEach-Object { Write-Host $_ }
+        return
+    }
+
+    # Compare all pairs
+    $allMatch = $true
+    $keys = @($results.Keys)
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        for ($j = $i + 1; $j -lt $keys.Count; $j++) {
+            $a = $results[$keys[$i]]
+            $b = $results[$keys[$j]]
+            if ($CompareMode -eq "exit-code-only") {
+                if ($a.ExitCode -ne $b.ExitCode) { $allMatch = $false }
+            } else {
+                if ($a.ExitCode -ne $b.ExitCode -or
+                    (@($a.NormalizedLines) -join "`n") -ne (@($b.NormalizedLines) -join "`n")) {
+                    $allMatch = $false
+                }
+            }
+        }
     }
 
     Write-Host ("=" * 80)
     Write-Host ("CASE   : {0}" -f $Case.Name)
     Write-Host ("COMMAND: winget {0}" -f $commandText)
-    Write-Host ("STATUS : {0}" -f ($(if ($sameOutput) { "MATCH" } else { "DIFF" })))
-    Write-Host ("RUST EXIT   : {0}" -f $RustResult.ExitCode)
-    Write-Host ("SYSTEM EXIT : {0}" -f $SystemResult.ExitCode)
-    Write-Host "--- RUST ---"
-    if ($RustResult.NormalizedLines.Count -eq 0) {
-        Write-Host "<no output>"
-    } else {
-        $RustResult.NormalizedLines | ForEach-Object { Write-Host $_ }
-    }
-    Write-Host "--- SYSTEM ---"
-    if ($SystemResult.NormalizedLines.Count -eq 0) {
-        Write-Host "<no output>"
-    } else {
-        $SystemResult.NormalizedLines | ForEach-Object { Write-Host $_ }
+    Write-Host ("STATUS : {0}" -f $(if ($allMatch) { "MATCH" } else { "DIFF" }))
+
+    foreach ($toolName in $results.Keys) {
+        $r = $results[$toolName]
+        Write-Host ("{0} EXIT: {1}" -f $toolName, $r.ExitCode)
     }
 
-    if (-not $sameOutput) {
-        Write-Host "--- DIFF ---"
-        Compare-Object -ReferenceObject $RustResult.NormalizedLines -DifferenceObject $SystemResult.NormalizedLines -SyncWindow 0 |
-            ForEach-Object {
-                Write-Host ("{0} {1}" -f $_.SideIndicator, $_.InputObject)
+    foreach ($toolName in $results.Keys) {
+        Write-Host "--- $toolName ---"
+        if ($r.NormalizedLines.Count -eq 0) {
+            Write-Host "<no output>"
+        } else {
+            $results[$toolName].NormalizedLines | ForEach-Object { Write-Host $_ }
+        }
+    }
+
+    if (-not $allMatch -and $CompareMode -ne "exit-code-only") {
+        # Show diffs between each pair
+        for ($i = 0; $i -lt $keys.Count; $i++) {
+            for ($j = $i + 1; $j -lt $keys.Count; $j++) {
+                $a = $results[$keys[$i]]
+                $b = $results[$keys[$j]]
+                $aLines = @($a.NormalizedLines)
+                $bLines = @($b.NormalizedLines)
+                if (($aLines -join "`n") -ne ($bLines -join "`n")) {
+                    Write-Host ("--- DIFF: {0} vs {1} ---" -f $keys[$i], $keys[$j])
+                    Compare-Object -ReferenceObject $aLines -DifferenceObject $bLines -SyncWindow 0 |
+                        ForEach-Object {
+                            $side = if ($_.SideIndicator -eq "<=") { $keys[$i] } else { $keys[$j] }
+                            Write-Host ("[{0}] {1}" -f $side, $_.InputObject)
+                        }
+                }
             }
+        }
     }
 }
 
 $caseSet = Select-CaseSet -RequestedCases $Cases
 foreach ($case in $caseSet) {
-    $rustArgs = if ($case.ContainsKey('RustArgs')) { $case.RustArgs } else { $case.Args }
-    $rustResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $rustArgs
     $compareMode = if ($case.ContainsKey('CompareMode')) { $case.CompareMode } else { "full" }
+    $rustArgs = if ($case.ContainsKey('RustArgs')) { $case.RustArgs } else { $case.Args }
+    $dotnetArgs = if ($case.ContainsKey('DotnetArgs')) { $case.DotnetArgs } else { $case.Args }
+
+    $rustResult = $null
+    $dotnetResult = $null
+    $systemResult = $null
+
+    if (-not $NoRust) {
+        $rustResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $rustArgs
+    }
+    if (-not $NoDotnet -and $compareMode -ne "rust-only") {
+        $dotnetResult = Invoke-WingetCapture -Executable $DotnetWinget -Arguments $dotnetArgs
+    }
+    if (-not $NoSystem -and $compareMode -ne "rust-only") {
+        $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
+    }
 
     if ($compareMode -eq "rust-only") {
-        # Rust-only feature — just show output, no system comparison
-        Write-Host ("=" * 80)
-        Write-Host ("CASE   : {0}" -f $case.Name)
-        $commandText = ($rustArgs | ForEach-Object {
-                if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
-            }) -join ' '
-        Write-Host ("COMMAND: winget {0}" -f $commandText)
-        Write-Host ("STATUS : RUST-ONLY (exit={0})" -f $rustResult.ExitCode)
-        Write-Host "--- RUST ---"
-        $rustResult.NormalizedLines | ForEach-Object { Write-Host $_ }
+        # Rust-only feature — show Rust and optionally Dotnet
+        if (-not $NoDotnet) {
+            $dotnetResult = Invoke-WingetCapture -Executable $DotnetWinget -Arguments $dotnetArgs
+        }
+        Write-CaseReport -Case $case -RustResult $rustResult -DotnetResult $dotnetResult -CompareMode "full"
 
         # Run post-steps if defined (for round-trip tests)
         if ($case.ContainsKey('PostSteps')) {
             foreach ($step in $case.PostSteps) {
-                $stepResult = Invoke-WingetCapture -Executable $RustWinget -Arguments $step.Args
-                Write-Host ("  [{0}] exit={1}: {2}" -f $step.Label, $stepResult.ExitCode, ($stepResult.NormalizedLines -join " | "))
+                if ($rustResult) {
+                    $stepRust = Invoke-WingetCapture -Executable $RustWinget -Arguments $step.Args
+                    Write-Host ("  [RUST {0}] exit={1}: {2}" -f $step.Label, $stepRust.ExitCode, ($stepRust.NormalizedLines -join " | "))
+                }
+                if ($dotnetResult) {
+                    $stepDotnet = Invoke-WingetCapture -Executable $DotnetWinget -Arguments $step.Args
+                    Write-Host ("  [DOTNET {0}] exit={1}: {2}" -f $step.Label, $stepDotnet.ExitCode, ($stepDotnet.NormalizedLines -join " | "))
+                }
             }
         }
-    }else {
-        $systemResult = Invoke-WingetCapture -Executable $SystemWinget -Arguments $case.Args
-        Write-CaseReport -Case $case -RustResult $rustResult -SystemResult $systemResult -CompareMode $compareMode
+    } else {
+        Write-CaseReport -Case $case -RustResult $rustResult -DotnetResult $dotnetResult -SystemResult $systemResult -CompareMode $compareMode
     }
 }
