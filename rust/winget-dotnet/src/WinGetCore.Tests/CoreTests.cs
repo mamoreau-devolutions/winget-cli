@@ -105,6 +105,83 @@ public class ModelsTests
         Assert.Empty(manifest.PackageDependencies);
         Assert.Empty(manifest.Documentation);
     }
+
+    [Fact]
+    public void ShowResult_ToStructuredDocument_UsesManifestSchema()
+    {
+        var result = new ShowResult
+        {
+            Package = new SearchMatch
+            {
+                SourceName = "winget",
+                SourceKind = SourceKind.PreIndexed,
+                Id = "Test.Package",
+                Name = "Test Package",
+                MatchCriteria = "Id",
+            },
+            Manifest = new Manifest
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                Version = "1.2.3",
+                Channel = "stable",
+                Publisher = "Contoso",
+                Description = "Structured output",
+                Tags = ["utility"],
+                PackageDependencies = ["Microsoft.VCRedist.2015+.x64"],
+                Documentation =
+                [
+                    new Documentation { Label = "Docs", Url = "https://example.test/docs" }
+                ],
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = "x64",
+                        InstallerType = "msix",
+                        Url = "https://example.test/Test.Package.msix",
+                        Sha256 = "ABC123",
+                        Locale = "en-US",
+                        Scope = "machine",
+                        Commands = ["testpkg"],
+                        PackageDependencies = ["Microsoft.UI.Xaml.2.8"],
+                    }
+                ],
+            },
+            SelectedInstaller = new Installer
+            {
+                Architecture = "x64",
+                InstallerType = "msix",
+                Url = "https://example.test/Test.Package.msix",
+                Sha256 = "ABC123",
+                Locale = "en-US",
+                Scope = "machine",
+                Commands = ["testpkg"],
+                PackageDependencies = ["Microsoft.UI.Xaml.2.8"],
+            },
+            CachedFiles = [@"C:\temp\cache\Test.Package.yaml"],
+            Warnings = ["cache warmed"],
+        };
+
+        var document = result.ToStructuredDocument();
+        var package = Assert.IsType<Dictionary<string, object?>>(document["Package"]);
+        var manifest = Assert.IsType<Dictionary<string, object?>>(document["Manifest"]);
+        var selectedInstaller = Assert.IsType<Dictionary<string, object?>>(document["SelectedInstaller"]);
+        var cachedFiles = Assert.IsType<List<string>>(document["CachedFiles"]);
+        var warnings = Assert.IsType<List<string>>(document["Warnings"]);
+
+        Assert.Equal("Test.Package", package["PackageIdentifier"]);
+        Assert.Equal("1.2.3", manifest["PackageVersion"]);
+
+        var dependencies = Assert.IsType<Dictionary<string, object?>>(manifest["Dependencies"]);
+        var packageDependencies = Assert.IsType<List<Dictionary<string, object?>>>(dependencies["PackageDependencies"]);
+        Assert.Equal("Microsoft.VCRedist.2015+.x64", packageDependencies[0]["PackageIdentifier"]);
+
+        var commands = Assert.IsType<List<string>>(selectedInstaller["Commands"]);
+        Assert.Equal("testpkg", commands[0]);
+        Assert.Equal(@"C:\temp\cache\Test.Package.yaml", cachedFiles[0]);
+        Assert.Equal("cache warmed", warnings[0]);
+    }
 }
 
 public class PinStoreTests

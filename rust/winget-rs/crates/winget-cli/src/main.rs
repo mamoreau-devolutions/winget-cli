@@ -15,8 +15,30 @@ struct Cli {
     command: Option<Commands>,
     #[arg(long = "info", global = true)]
     info: bool,
-    #[arg(long = "output", short = 'o', global = true, value_parser = ["json", "text"])]
+    #[arg(long = "output", short = 'o', global = true, value_parser = ["json", "text", "yaml"])]
     output: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Json,
+    Yaml,
+}
+
+impl OutputFormat {
+    fn from_option(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("text") {
+            "text" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            "yaml" => Ok(Self::Yaml),
+            other => bail!("unsupported output format: {other}"),
+        }
+    }
+
+    fn is_text(self) -> bool {
+        matches!(self, Self::Text)
+    }
 }
 
 #[derive(Subcommand)]
@@ -325,7 +347,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let json = cli.output.as_deref() == Some("json");
+    let output = OutputFormat::from_option(cli.output.as_deref())?;
 
     if cli.info {
         print_info();
@@ -346,27 +368,27 @@ fn run() -> Result<()> {
             let details = args.details;
             let upgrade = args.upgrade;
             let result = repository.list(&args.clone().into())?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
+            if output.is_text() {
                 print_list_result(result, details, upgrade);
+            } else {
+                print_serialized(&result, output)?;
             }
         }
         Commands::Show(args) => {
             let mut repository = Repository::open()?;
             if args.versions {
                 let result = repository.show_versions(&args.query.into())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                if output.is_text() {
                     print_versions(result);
+                } else {
+                    print_serialized(&result, output)?;
                 }
             } else {
                 let result = repository.show(&args.query.into())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                if output.is_text() {
                     print_show(result);
+                } else {
+                    print_serialized(&result.structured_document(), output)?;
                 }
             }
         }
@@ -374,17 +396,17 @@ fn run() -> Result<()> {
             let mut repository = Repository::open()?;
             if args.versions {
                 let result = repository.search_versions(&args.clone().into())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                if output.is_text() {
                     print_versions(result);
+                } else {
+                    print_serialized(&result, output)?;
                 }
             } else {
                 let result = repository.search(&args.into())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                if output.is_text() {
                     print_search(result);
+                } else {
+                    print_serialized(&result, output)?;
                 }
             }
         }
@@ -400,14 +422,12 @@ fn run() -> Result<()> {
             let result = repository.list(&list_query)?;
 
             if !do_install {
-                // List mode only
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
+                if output.is_text() {
                     print_list_result(result, false, true);
+                } else {
+                    print_serialized(&result, output)?;
                 }
             } else {
-                // Actually perform upgrades
                 let upgradeable: Vec<_> = result
                     .matches
                     .iter()
@@ -482,7 +502,14 @@ fn run() -> Result<()> {
         Commands::Cache { command } => {
             let mut repository = Repository::open()?;
             match command {
-                CacheCommands::Warm(args) => print_cache_warm(repository.warm_cache(&args.into())?),
+                CacheCommands::Warm(args) => {
+                    let result = repository.warm_cache(&args.into())?;
+                    if output.is_text() {
+                        print_cache_warm(result);
+                    } else {
+                        print_serialized(&result, output)?;
+                    }
+                }
             }
         }
         Commands::Hash(args) => {
@@ -514,7 +541,9 @@ fn run() -> Result<()> {
             match command {
                 PinCommands::List => {
                     let pins = repository.list_pins()?;
-                    if pins.is_empty() {
+                    if !output.is_text() {
+                        print_serialized(&pins, output)?;
+                    } else if pins.is_empty() {
                         println!("No pins found.");
                     } else {
                         println!(
@@ -573,6 +602,15 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn print_serialized<T: serde::Serialize>(value: &T, output: OutputFormat) -> Result<()> {
+    match output {
+        OutputFormat::Text => bail!("structured output requested without a serializer"),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
+        OutputFormat::Yaml => print!("{}", serde_yaml::to_string(value)?),
+    }
     Ok(())
 }
 

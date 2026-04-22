@@ -175,6 +175,15 @@ public record ShowResult
     public Installer? SelectedInstaller { get; init; }
     public List<string> CachedFiles { get; init; } = [];
     public List<string> Warnings { get; init; } = [];
+
+    public Dictionary<string, object?> ToStructuredDocument() => new()
+    {
+        ["Package"] = StructuredOutput.PackageDocument(Package, Manifest),
+        ["Manifest"] = StructuredOutput.ManifestDocument(Manifest),
+        ["SelectedInstaller"] = SelectedInstaller is null ? null : StructuredOutput.InstallerDocument(SelectedInstaller),
+        ["CachedFiles"] = CachedFiles,
+        ["Warnings"] = Warnings,
+    };
 }
 
 public record VersionsResult
@@ -250,3 +259,97 @@ internal abstract record MatchLocator;
 internal record PreIndexedV1Locator(long PackageRowId) : MatchLocator;
 internal record PreIndexedV2Locator(long PackageRowId, string PackageHash) : MatchLocator;
 internal record RestLocator(string PackageId, List<VersionKey> Versions) : MatchLocator;
+
+file static class StructuredOutput
+{
+    public static Dictionary<string, object?> PackageDocument(SearchMatch package, Manifest manifest)
+    {
+        var document = new Dictionary<string, object?>
+        {
+            ["PackageIdentifier"] = package.Id,
+            ["PackageName"] = package.Name,
+            ["SourceName"] = package.SourceName,
+            ["SourceKind"] = package.SourceKind.ToString().ToLowerInvariant(),
+            ["PackageVersion"] = manifest.Version,
+        };
+
+        AddString(document, "Channel", manifest.Channel);
+        AddString(document, "MatchCriteria", package.MatchCriteria);
+        return document;
+    }
+
+    public static Dictionary<string, object?> ManifestDocument(Manifest manifest)
+    {
+        var document = new Dictionary<string, object?>
+        {
+            ["PackageIdentifier"] = manifest.Id,
+            ["PackageName"] = manifest.Name,
+            ["PackageVersion"] = manifest.Version,
+            ["Tags"] = manifest.Tags,
+            ["Documentations"] = manifest.Documentation.Select(DocumentationDocument).ToList(),
+            ["Installers"] = manifest.Installers.Select(InstallerDocument).ToList(),
+        };
+
+        AddString(document, "Channel", manifest.Channel);
+        AddString(document, "Publisher", manifest.Publisher);
+        AddString(document, "Description", manifest.Description);
+        AddString(document, "Moniker", manifest.Moniker);
+        AddString(document, "PackageUrl", manifest.PackageUrl);
+        AddString(document, "PublisherUrl", manifest.PublisherUrl);
+        AddString(document, "PublisherSupportUrl", manifest.PublisherSupportUrl);
+        AddString(document, "License", manifest.License);
+        AddString(document, "LicenseUrl", manifest.LicenseUrl);
+        AddString(document, "PrivacyUrl", manifest.PrivacyUrl);
+        AddString(document, "Author", manifest.Author);
+        AddString(document, "Copyright", manifest.Copyright);
+        AddString(document, "CopyrightUrl", manifest.CopyrightUrl);
+        AddString(document, "ReleaseNotes", manifest.ReleaseNotes);
+        AddString(document, "ReleaseNotesUrl", manifest.ReleaseNotesUrl);
+
+        if (manifest.PackageDependencies.Count > 0)
+            document["Dependencies"] = PackageDependenciesDocument(manifest.PackageDependencies);
+
+        return document;
+    }
+
+    public static Dictionary<string, object?> DocumentationDocument(Documentation documentation)
+    {
+        var document = new Dictionary<string, object?> { ["DocumentUrl"] = documentation.Url };
+        AddString(document, "DocumentLabel", documentation.Label);
+        return document;
+    }
+
+    public static Dictionary<string, object?> InstallerDocument(Installer installer)
+    {
+        var document = new Dictionary<string, object?>();
+        AddString(document, "Architecture", installer.Architecture);
+        AddString(document, "InstallerType", installer.InstallerType);
+        AddString(document, "InstallerUrl", installer.Url);
+        AddString(document, "InstallerSha256", installer.Sha256);
+        AddString(document, "ProductCode", installer.ProductCode);
+        AddString(document, "InstallerLocale", installer.Locale);
+        AddString(document, "Scope", installer.Scope);
+        AddString(document, "ReleaseDate", installer.ReleaseDate);
+        AddString(document, "PackageFamilyName", installer.PackageFamilyName);
+        AddString(document, "UpgradeCode", installer.UpgradeCode);
+        if (installer.Commands.Count > 0)
+            document["Commands"] = installer.Commands;
+        if (installer.PackageDependencies.Count > 0)
+            document["Dependencies"] = PackageDependenciesDocument(installer.PackageDependencies);
+        return document;
+    }
+
+    private static Dictionary<string, object?> PackageDependenciesDocument(IEnumerable<string> packageDependencies) =>
+        new()
+        {
+            ["PackageDependencies"] = packageDependencies
+                .Select(packageId => new Dictionary<string, object?> { ["PackageIdentifier"] = packageId })
+                .ToList()
+        };
+
+    private static void AddString(Dictionary<string, object?> document, string key, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+            document[key] = value;
+    }
+}

@@ -2,13 +2,15 @@ using System.CommandLine;
 using System.Security.Cryptography;
 using System.Text.Json;
 using WinGetCore;
+using YamlDotNet.Serialization;
 
 const string Version = "0.1.0";
 
 var rootCommand = new RootCommand("Pure C# subset of the winget CLI");
 
-var outputOption = new Option<string?>("--output", "Output format: json or text");
+var outputOption = new Option<string?>("--output", "Output format: text, json, or yaml");
 outputOption.AddAlias("-o");
+outputOption.FromAmong("text", "json", "yaml");
 rootCommand.AddGlobalOption(outputOption);
 
 var JsonOpts = new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -40,7 +42,7 @@ searchCommand.AddArgument(sqArg);
 
 searchCommand.SetHandler((ctx) =>
 {
-    var json = ctx.ParseResult.GetValueForOption(outputOption) == "json";
+    var output = GetOutputFormat(ctx.ParseResult.GetValueForOption(outputOption));
     var query = new PackageQuery
     {
         Query = ctx.ParseResult.GetValueForArgument(sqArg) ?? ctx.ParseResult.GetValueForOption(sqOpt),
@@ -58,13 +60,13 @@ searchCommand.SetHandler((ctx) =>
     if (ctx.ParseResult.GetValueForOption(sVersionsOpt))
     {
         var result = repo.SearchVersions(query);
-        if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+        if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
         else PrintVersions(result);
     }
     else
     {
         var result = repo.Search(query);
-        if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+        if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
         else PrintSearch(result);
     }
 });
@@ -85,7 +87,7 @@ showCommand.AddArgument(shArg);
 
 showCommand.SetHandler((ctx) =>
 {
-    var json = ctx.ParseResult.GetValueForOption(outputOption) == "json";
+    var output = GetOutputFormat(ctx.ParseResult.GetValueForOption(outputOption));
     var query = new PackageQuery
     {
         Query = ctx.ParseResult.GetValueForArgument(shArg) ?? ctx.ParseResult.GetValueForOption(shqOpt),
@@ -105,13 +107,13 @@ showCommand.SetHandler((ctx) =>
     if (ctx.ParseResult.GetValueForOption(shVerOpt))
     {
         var result = repo.ShowVersions(query);
-        if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+        if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
         else PrintVersions(result);
     }
     else
     {
         var result = repo.Show(query);
-        if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+        if (output != OutputFormat.Text) WriteStructuredOutput(result.ToStructuredDocument(), output);
         else PrintShow(result);
     }
 });
@@ -135,7 +137,7 @@ listCommand.AddArgument(lArg);
 
 listCommand.SetHandler((ctx) =>
 {
-    var json = ctx.ParseResult.GetValueForOption(outputOption) == "json";
+    var output = GetOutputFormat(ctx.ParseResult.GetValueForOption(outputOption));
     var details = ctx.ParseResult.GetValueForOption(lDetailsOpt);
     var upgrade = ctx.ParseResult.GetValueForOption(lUpgradeOpt);
     var query = new ListQuery
@@ -157,7 +159,7 @@ listCommand.SetHandler((ctx) =>
 
     using var repo = Repository.Open();
     var result = repo.List(query);
-    if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+    if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
     else PrintListResult(result, details, upgrade);
 });
 
@@ -177,7 +179,7 @@ upgradeCommand.AddArgument(uArg);
 
 upgradeCommand.SetHandler((ctx) =>
 {
-    var json = ctx.ParseResult.GetValueForOption(outputOption) == "json";
+    var output = GetOutputFormat(ctx.ParseResult.GetValueForOption(outputOption));
     var doInstall = ctx.ParseResult.GetValueForOption(uAllOpt)
         || ctx.ParseResult.GetValueForArgument(uArg) is not null
         || ctx.ParseResult.GetValueForOption(uqOpt) is not null
@@ -204,7 +206,7 @@ upgradeCommand.SetHandler((ctx) =>
 
     if (!doInstall)
     {
-        if (json) Console.WriteLine(JsonSerializer.Serialize(result, JsonOpts));
+        if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
         else PrintListResult(result, false, true);
     }
     else
@@ -314,6 +316,7 @@ cacheCommand.AddCommand(cacheWarmCmd);
 
 cacheWarmCmd.SetHandler((ctx) =>
 {
+    var output = GetOutputFormat(ctx.ParseResult.GetValueForOption(outputOption));
     var query = new PackageQuery
     {
         Query = ctx.ParseResult.GetValueForArgument(cwArg) ?? ctx.ParseResult.GetValueForOption(cwqOpt),
@@ -323,8 +326,12 @@ cacheWarmCmd.SetHandler((ctx) =>
     };
     using var repo = Repository.Open();
     var result = repo.WarmCache(query);
-    Console.WriteLine($"Warmed cache for {result.Package.Name} [{result.Package.Id}]");
-    foreach (var f in result.CachedFiles) Console.WriteLine($"  {f}");
+    if (output != OutputFormat.Text) WriteStructuredOutput(result, output);
+    else
+    {
+        Console.WriteLine($"Warmed cache for {result.Package.Name} [{result.Package.Id}]");
+        foreach (var f in result.CachedFiles) Console.WriteLine($"  {f}");
+    }
 });
 
 // ── Hash ──
@@ -638,6 +645,29 @@ static void PrintInfo()
     Console.WriteLine($"OS: {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
 }
 
+static OutputFormat GetOutputFormat(string? value) =>
+    value?.ToLowerInvariant() switch
+    {
+        "json" => OutputFormat.Json,
+        "yaml" => OutputFormat.Yaml,
+        _ => OutputFormat.Text,
+    };
+
+void WriteStructuredOutput(object value, OutputFormat output)
+{
+    switch (output)
+    {
+        case OutputFormat.Json:
+            Console.WriteLine(JsonSerializer.Serialize(value, JsonOpts));
+            break;
+        case OutputFormat.Yaml:
+            Console.Write(new SerializerBuilder().Build().Serialize(value));
+            break;
+        default:
+            throw new InvalidOperationException("Text output should be handled separately.");
+    }
+}
+
 static void PrintSearch(SearchResponse result)
 {
     PrintWarnings(result.Warnings);
@@ -927,4 +957,11 @@ static void PrintTableLine(string[] values, int[] widths, bool[] spaceAfter)
         }
     }
     Console.WriteLine(sb.ToString().TrimEnd());
+}
+
+enum OutputFormat
+{
+    Text,
+    Json,
+    Yaml,
 }

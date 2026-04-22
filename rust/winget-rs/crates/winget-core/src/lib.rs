@@ -6,7 +6,7 @@ use rusqlite::{
     types::{Value as SqlValue, ValueRef},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::path::Path;
 use sha2::{Digest, Sha256};
@@ -257,6 +257,41 @@ pub struct ShowResult {
     pub warnings: Vec<String>,
 }
 
+impl ShowResult {
+    pub fn structured_document(&self) -> JsonValue {
+        let mut root = JsonMap::new();
+        root.insert("Package".to_string(), self.package.structured_document(&self.manifest));
+        root.insert("Manifest".to_string(), self.manifest.structured_document());
+        root.insert(
+            "SelectedInstaller".to_string(),
+            self.selected_installer
+                .as_ref()
+                .map(Installer::structured_document)
+                .unwrap_or(JsonValue::Null),
+        );
+        root.insert(
+            "CachedFiles".to_string(),
+            JsonValue::Array(
+                self.cached_files
+                    .iter()
+                    .map(|path| JsonValue::String(path.display().to_string()))
+                    .collect(),
+            ),
+        );
+        root.insert(
+            "Warnings".to_string(),
+            JsonValue::Array(
+                self.warnings
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+        JsonValue::Object(root)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VersionsResult {
     pub package: SearchMatch,
@@ -312,6 +347,229 @@ pub struct InstallResult {
     pub installer_type: String,
     pub exit_code: i32,
     pub success: bool,
+}
+
+impl SearchMatch {
+    fn structured_document(&self, manifest: &Manifest) -> JsonValue {
+        let mut object = JsonMap::new();
+        object.insert(
+            "PackageIdentifier".to_string(),
+            JsonValue::String(self.id.clone()),
+        );
+        object.insert("PackageName".to_string(), JsonValue::String(self.name.clone()));
+        object.insert(
+            "SourceName".to_string(),
+            JsonValue::String(self.source_name.clone()),
+        );
+        object.insert(
+            "SourceKind".to_string(),
+            JsonValue::String(self.source_kind.to_string()),
+        );
+        object.insert(
+            "PackageVersion".to_string(),
+            JsonValue::String(manifest.version.clone()),
+        );
+        if !manifest.channel.is_empty() {
+            object.insert(
+                "Channel".to_string(),
+                JsonValue::String(manifest.channel.clone()),
+            );
+        }
+        if let Some(criteria) = &self.match_criteria {
+            object.insert(
+                "MatchCriteria".to_string(),
+                JsonValue::String(criteria.clone()),
+            );
+        }
+        JsonValue::Object(object)
+    }
+}
+
+impl Manifest {
+    fn structured_document(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        object.insert(
+            "PackageIdentifier".to_string(),
+            JsonValue::String(self.id.clone()),
+        );
+        object.insert("PackageName".to_string(), JsonValue::String(self.name.clone()));
+        object.insert(
+            "PackageVersion".to_string(),
+            JsonValue::String(self.version.clone()),
+        );
+        insert_json_string(&mut object, "Channel", self.channel.as_str());
+        insert_optional_json_string(&mut object, "Publisher", self.publisher.as_deref());
+        insert_optional_json_string(&mut object, "Description", self.description.as_deref());
+        insert_optional_json_string(&mut object, "Moniker", self.moniker.as_deref());
+        insert_optional_json_string(&mut object, "PackageUrl", self.package_url.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "PublisherUrl",
+            self.publisher_url.as_deref(),
+        );
+        insert_optional_json_string(
+            &mut object,
+            "PublisherSupportUrl",
+            self.publisher_support_url.as_deref(),
+        );
+        insert_optional_json_string(&mut object, "License", self.license.as_deref());
+        insert_optional_json_string(&mut object, "LicenseUrl", self.license_url.as_deref());
+        insert_optional_json_string(&mut object, "PrivacyUrl", self.privacy_url.as_deref());
+        insert_optional_json_string(&mut object, "Author", self.author.as_deref());
+        insert_optional_json_string(&mut object, "Copyright", self.copyright.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "CopyrightUrl",
+            self.copyright_url.as_deref(),
+        );
+        insert_optional_json_string(
+            &mut object,
+            "ReleaseNotes",
+            self.release_notes.as_deref(),
+        );
+        insert_optional_json_string(
+            &mut object,
+            "ReleaseNotesUrl",
+            self.release_notes_url.as_deref(),
+        );
+        object.insert(
+            "Tags".to_string(),
+            JsonValue::Array(
+                self.tags
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+        if !self.package_dependencies.is_empty() {
+            object.insert(
+                "Dependencies".to_string(),
+                package_dependencies_document(&self.package_dependencies),
+            );
+        }
+        object.insert(
+            "Documentations".to_string(),
+            JsonValue::Array(
+                self.documentation
+                    .iter()
+                    .map(Documentation::structured_document)
+                    .collect(),
+            ),
+        );
+        object.insert(
+            "Installers".to_string(),
+            JsonValue::Array(
+                self.installers
+                    .iter()
+                    .map(Installer::structured_document)
+                    .collect(),
+            ),
+        );
+        JsonValue::Object(object)
+    }
+}
+
+impl Documentation {
+    fn structured_document(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        insert_optional_json_string(&mut object, "DocumentLabel", self.label.as_deref());
+        object.insert("DocumentUrl".to_string(), JsonValue::String(self.url.clone()));
+        JsonValue::Object(object)
+    }
+}
+
+impl Installer {
+    fn structured_document(&self) -> JsonValue {
+        let mut object = JsonMap::new();
+        insert_optional_json_string(
+            &mut object,
+            "Architecture",
+            self.architecture.as_deref(),
+        );
+        insert_optional_json_string(
+            &mut object,
+            "InstallerType",
+            self.installer_type.as_deref(),
+        );
+        insert_optional_json_string(&mut object, "InstallerUrl", self.url.as_deref());
+        insert_optional_json_string(&mut object, "InstallerSha256", self.sha256.as_deref());
+        insert_optional_json_string(&mut object, "ProductCode", self.product_code.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "InstallerLocale",
+            self.locale.as_deref(),
+        );
+        insert_optional_json_string(&mut object, "Scope", self.scope.as_deref());
+        insert_optional_json_string(
+            &mut object,
+            "ReleaseDate",
+            self.release_date.as_deref(),
+        );
+        insert_optional_json_string(
+            &mut object,
+            "PackageFamilyName",
+            self.package_family_name.as_deref(),
+        );
+        insert_optional_json_string(&mut object, "UpgradeCode", self.upgrade_code.as_deref());
+        if !self.commands.is_empty() {
+            object.insert(
+                "Commands".to_string(),
+                JsonValue::Array(
+                    self.commands
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.package_dependencies.is_empty() {
+            object.insert(
+                "Dependencies".to_string(),
+                package_dependencies_document(&self.package_dependencies),
+            );
+        }
+        JsonValue::Object(object)
+    }
+}
+
+fn insert_json_string(target: &mut JsonMap<String, JsonValue>, key: &str, value: &str) {
+    if !value.is_empty() {
+        target.insert(key.to_string(), JsonValue::String(value.to_string()));
+    }
+}
+
+fn insert_optional_json_string(
+    target: &mut JsonMap<String, JsonValue>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        target.insert(key.to_string(), JsonValue::String(value.to_string()));
+    }
+}
+
+fn package_dependencies_document(package_ids: &[String]) -> JsonValue {
+    let mut dependencies = JsonMap::new();
+    dependencies.insert(
+        "PackageDependencies".to_string(),
+        JsonValue::Array(
+            package_ids
+                .iter()
+                .cloned()
+                .map(|package_id| {
+                    let mut dependency = JsonMap::new();
+                    dependency.insert(
+                        "PackageIdentifier".to_string(),
+                        JsonValue::String(package_id),
+                    );
+                    JsonValue::Object(dependency)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(dependencies)
 }
 
 #[derive(Debug, Clone)]
@@ -3975,6 +4233,103 @@ mod tests {
             pins_db_path(&app_root),
             app_root.join("pins.db")
         );
+    }
+
+    #[test]
+    fn show_result_structured_document_is_manifest_oriented() {
+        let result = ShowResult {
+            package: SearchMatch {
+                source_name: "winget".to_string(),
+                source_kind: SourceKind::PreIndexed,
+                id: "Test.Package".to_string(),
+                name: "Test Package".to_string(),
+                moniker: Some("testpkg".to_string()),
+                version: Some("1.2.3".to_string()),
+                channel: Some("stable".to_string()),
+                match_criteria: Some("Id".to_string()),
+            },
+            manifest: Manifest {
+                id: "Test.Package".to_string(),
+                name: "Test Package".to_string(),
+                version: "1.2.3".to_string(),
+                channel: "stable".to_string(),
+                publisher: Some("Contoso".to_string()),
+                description: Some("Structured output".to_string()),
+                moniker: Some("testpkg".to_string()),
+                package_url: None,
+                publisher_url: None,
+                publisher_support_url: None,
+                license: None,
+                license_url: None,
+                privacy_url: None,
+                author: None,
+                copyright: None,
+                copyright_url: None,
+                release_notes: None,
+                release_notes_url: None,
+                tags: vec!["utility".to_string()],
+                package_dependencies: vec!["Microsoft.VCRedist.2015+.x64".to_string()],
+                documentation: vec![Documentation {
+                    label: Some("Docs".to_string()),
+                    url: "https://example.test/docs".to_string(),
+                }],
+                installers: vec![Installer {
+                    architecture: Some("x64".to_string()),
+                    installer_type: Some("msix".to_string()),
+                    url: Some("https://example.test/Test.Package.msix".to_string()),
+                    sha256: Some("ABC123".to_string()),
+                    product_code: None,
+                    locale: Some("en-US".to_string()),
+                    scope: Some("machine".to_string()),
+                    release_date: None,
+                    package_family_name: None,
+                    upgrade_code: None,
+                    commands: vec!["testpkg".to_string()],
+                    package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
+                }],
+            },
+            selected_installer: Some(Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("msix".to_string()),
+                url: Some("https://example.test/Test.Package.msix".to_string()),
+                sha256: Some("ABC123".to_string()),
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("machine".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                commands: vec!["testpkg".to_string()],
+                package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
+            }),
+            cached_files: vec![PathBuf::from(r"C:\temp\cache\Test.Package.yaml")],
+            warnings: vec!["cache warmed".to_string()],
+        };
+
+        let document = result.structured_document();
+
+        assert_eq!(
+            document["Package"]["PackageIdentifier"].as_str(),
+            Some("Test.Package")
+        );
+        assert_eq!(
+            document["Manifest"]["PackageVersion"].as_str(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            document["Manifest"]["Dependencies"]["PackageDependencies"][0]["PackageIdentifier"]
+                .as_str(),
+            Some("Microsoft.VCRedist.2015+.x64")
+        );
+        assert_eq!(
+            document["SelectedInstaller"]["Commands"][0].as_str(),
+            Some("testpkg")
+        );
+        assert_eq!(
+            document["CachedFiles"][0].as_str(),
+            Some(r"C:\temp\cache\Test.Package.yaml")
+        );
+        assert_eq!(document["Warnings"][0].as_str(), Some("cache warmed"));
     }
 
     #[test]
