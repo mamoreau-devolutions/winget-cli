@@ -36,7 +36,8 @@ var ssOpt = SourceOpt(); var seOpt = ExactOpt(); var scOpt = CountOpt();
 var sTagOpt = new Option<string?>("--tag", "Filter by tag");
 var sCmdOpt = new Option<string?>("--command", "Filter by command"); sCmdOpt.AddAlias("--cmd");
 var sVersionsOpt = new Option<bool>("--versions", "Show versions");
-foreach (var o in new Option[] { sqOpt, sidOpt, snOpt, smOpt, ssOpt, seOpt, scOpt, sTagOpt, sCmdOpt, sVersionsOpt })
+var sManifestsOpt = new Option<bool>("--manifests", "Return show-style manifests");
+foreach (var o in new Option[] { sqOpt, sidOpt, snOpt, smOpt, ssOpt, seOpt, scOpt, sTagOpt, sCmdOpt, sVersionsOpt, sManifestsOpt })
     searchCommand.AddOption(o);
 searchCommand.AddArgument(sqArg);
 
@@ -57,7 +58,16 @@ searchCommand.SetHandler((ctx) =>
     };
 
     using var repo = Repository.Open();
-    if (ctx.ParseResult.GetValueForOption(sVersionsOpt))
+    if (ctx.ParseResult.GetValueForOption(sManifestsOpt))
+    {
+        if (output == OutputFormat.Text)
+            throw new InvalidOperationException("--manifests requires --output json or yaml");
+        if (ctx.ParseResult.GetValueForOption(sVersionsOpt))
+            throw new InvalidOperationException("--manifests cannot be combined with --versions");
+
+        WriteStructuredOutput(repo.SearchManifests(query), output);
+    }
+    else if (ctx.ParseResult.GetValueForOption(sVersionsOpt))
     {
         var result = repo.SearchVersions(query);
         if (output != OutputFormat.Text) WriteStructuredOutput(result, output);

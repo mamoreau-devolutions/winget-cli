@@ -336,6 +336,8 @@ struct SearchArgs {
     exact: bool,
     #[arg(long = "versions")]
     versions: bool,
+    #[arg(long = "manifests", conflicts_with = "versions")]
+    manifests: bool,
 }
 
 #[derive(Args, Clone)]
@@ -433,7 +435,14 @@ fn run() -> Result<()> {
         }
         Commands::Search(args) => {
             let mut repository = Repository::open()?;
-            if args.versions {
+            if args.manifests {
+                if output.is_text() {
+                    bail!("--manifests requires --output json or yaml");
+                }
+
+                let result = repository.search_manifests(&args.into())?;
+                print_serialized(&result, output)?;
+            } else if args.versions {
                 let result = repository.search_versions(&args.clone().into())?;
                 if output.is_text() {
                     print_versions(result);

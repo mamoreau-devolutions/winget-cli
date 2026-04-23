@@ -118,6 +118,16 @@ public class Repository : IDisposable
         };
     }
 
+    public List<Dictionary<string, object?>> SearchManifests(PackageQuery query)
+    {
+        var (matches, _, _) = SearchLocated(query, SearchSemantics.Many);
+        return StructuredOutput.CollapseManifestResults(matches.Select(located =>
+        {
+            var (_, structuredDocument, _) = ManifestForMatch(located, query);
+            return structuredDocument;
+        }));
+    }
+
     // ── Show ──
 
     public ShowResult Show(PackageQuery query)

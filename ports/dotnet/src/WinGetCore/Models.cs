@@ -330,7 +330,7 @@ internal record PreIndexedV1Locator(long PackageRowId) : MatchLocator;
 internal record PreIndexedV2Locator(long PackageRowId, string PackageHash) : MatchLocator;
 internal record RestLocator(string PackageId, List<VersionKey> Versions) : MatchLocator;
 
-file static class StructuredOutput
+internal static class StructuredOutput
 {
     public static Dictionary<string, object?> CollapseManifestDocuments(object structuredDocument)
     {
@@ -341,6 +341,9 @@ file static class StructuredOutput
             _ => throw new InvalidOperationException("Unexpected manifest document shape.")
         };
     }
+
+    internal static List<Dictionary<string, object?>> CollapseManifestResults(IEnumerable<object> structuredDocuments)
+        => structuredDocuments.Select(CollapseManifestDocuments).ToList();
 
     private static Dictionary<string, object?> CollapseManifestDocument(Dictionary<string, object?> document)
     {

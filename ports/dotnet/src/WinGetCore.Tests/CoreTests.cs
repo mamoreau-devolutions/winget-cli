@@ -289,6 +289,67 @@ public class ModelsTests
     }
 
     [Fact]
+    public void CollapseManifestResults_ReturnsPluralShowDocuments()
+    {
+        var results = StructuredOutput.CollapseManifestResults(
+        [
+            new List<Dictionary<string, object?>>
+            {
+                new()
+                {
+                    ["PackageIdentifier"] = "Test.Package.One",
+                    ["PackageVersion"] = "1.0.0",
+                    ["DefaultLocale"] = "en-US",
+                    ["ManifestType"] = "version",
+                    ["ManifestVersion"] = "1.10.0",
+                },
+                new()
+                {
+                    ["PackageIdentifier"] = "Test.Package.One",
+                    ["PackageVersion"] = "1.0.0",
+                    ["PackageLocale"] = "en-US",
+                    ["PackageName"] = "Test Package One",
+                    ["ManifestType"] = "defaultLocale",
+                    ["ManifestVersion"] = "1.10.0",
+                },
+                new()
+                {
+                    ["PackageIdentifier"] = "Test.Package.One",
+                    ["PackageVersion"] = "1.0.0",
+                    ["ManifestType"] = "installer",
+                    ["ManifestVersion"] = "1.10.0",
+                    ["Installers"] = new List<Dictionary<string, object?>>
+                    {
+                        new()
+                        {
+                            ["Architecture"] = "x64",
+                            ["InstallerType"] = "exe",
+                            ["InstallerUrl"] = "https://example.test/one.exe",
+                            ["InstallerSha256"] = "ABC123",
+                        }
+                    }
+                }
+            },
+            new Dictionary<string, object?>
+            {
+                ["PackageIdentifier"] = "Test.Package.Two",
+                ["PackageVersion"] = "2.0.0",
+                ["PackageLocale"] = "en-US",
+                ["PackageName"] = "Test Package Two",
+                ["ManifestType"] = "singleton",
+                ["ManifestVersion"] = "1.12.0",
+            }
+        ]);
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal("singleton", results[0]["ManifestType"]);
+        Assert.Equal("Test.Package.One", results[0]["PackageIdentifier"]);
+        Assert.Equal("Test Package One", results[0]["PackageName"]);
+        Assert.Equal("singleton", results[1]["ManifestType"]);
+        Assert.Equal("Test.Package.Two", results[1]["PackageIdentifier"]);
+    }
+
+    [Fact]
     public void ParseYamlManifest_ReadsInstallerSwitches()
     {
         var yaml = """

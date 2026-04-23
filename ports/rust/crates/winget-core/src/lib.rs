@@ -355,18 +355,7 @@ pub struct ShowResult {
 
 impl ShowResult {
     pub fn structured_document(&self) -> JsonValue {
-        match &self.manifest_documents {
-            JsonValue::Array(documents) => merge_manifest_documents(documents),
-            JsonValue::Object(document)
-                if document
-                    .get("ManifestType")
-                    .and_then(JsonValue::as_str)
-                    .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("merged")) =>
-            {
-                merged_manifest_to_singleton(&self.manifest_documents)
-            }
-            _ => self.manifest_documents.clone(),
-        }
+        collapse_structured_document(&self.manifest_documents)
     }
 }
 
@@ -649,6 +638,17 @@ impl Repository {
             warnings,
             truncated,
         })
+    }
+
+    pub fn search_manifests(&mut self, query: &PackageQuery) -> Result<Vec<JsonValue>> {
+        let (matches, _, _) = self.search_located(query, SearchSemantics::Many)?;
+        let mut structured_documents = Vec::with_capacity(matches.len());
+        for located in matches {
+            let (_, manifest_documents, _) = self.manifest_for_match(&located, query)?;
+            structured_documents.push(manifest_documents);
+        }
+
+        Ok(collapse_structured_documents(&structured_documents))
     }
 
     pub fn list(&mut self, query: &ListQuery) -> Result<ListResponse> {
@@ -3481,7 +3481,7 @@ fn parse_yaml_manifest_bundle(bytes: &[u8]) -> Result<(Manifest, JsonValue)> {
         documentation: yaml_documentation_list(&merged),
         installers,
         },
-        collapse_manifest_documents(documents),
+        collapse_structured_document(&JsonValue::Array(documents)),
     ))
 }
 
@@ -3579,30 +3579,23 @@ fn parse_rest_manifest(
     ))
 }
 
-fn collapse_manifest_documents(documents: Vec<JsonValue>) -> JsonValue {
-    if documents.len() == 1 {
-        let document = documents.into_iter().next().unwrap_or(JsonValue::Null);
-        if document
-            .get("ManifestType")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("merged"))
+fn collapse_structured_document(document: &JsonValue) -> JsonValue {
+    match document {
+        JsonValue::Array(documents)
+            if documents.len() == 1 && is_merged_manifest_document(&documents[0]) =>
         {
-            merged_manifest_to_singleton(&document)
-        } else {
-            document
+            merge_manifest_documents(&split_merged_manifest_document(&documents[0]))
         }
-    } else {
-        merge_manifest_documents(&documents)
+        JsonValue::Array(documents) => merge_manifest_documents(documents),
+        JsonValue::Object(_) if is_merged_manifest_document(document) => {
+            merge_manifest_documents(&split_merged_manifest_document(document))
+        }
+        _ => document.clone(),
     }
 }
 
-fn merged_manifest_to_singleton(merged: &JsonValue) -> JsonValue {
-    let mut document = merged.as_object().cloned().unwrap_or_else(JsonMap::new);
-    document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("singleton".to_string()),
-    );
-    JsonValue::Object(document)
+fn collapse_structured_documents(documents: &[JsonValue]) -> Vec<JsonValue> {
+    documents.iter().map(collapse_structured_document).collect()
 }
 
 fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
@@ -3660,6 +3653,162 @@ fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
     singleton.remove("DefaultLocale");
 
     JsonValue::Object(singleton)
+}
+
+fn is_merged_manifest_document(document: &JsonValue) -> bool {
+    document
+        .get("ManifestType")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("merged"))
+}
+
+fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
+    let package_identifier =
+        json_string(merged, "PackageIdentifier").unwrap_or_default();
+    let package_version = json_string(merged, "PackageVersion").unwrap_or_default();
+    let package_locale =
+        json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
+    let manifest_version =
+        json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string());
+
+    let version_document = serde_json::json!({
+        "PackageIdentifier": package_identifier,
+        "PackageVersion": package_version,
+        "DefaultLocale": package_locale,
+        "ManifestType": "version",
+        "ManifestVersion": manifest_version,
+    });
+
+    let mut default_locale_document = project_manifest_document(
+        merged,
+        &[
+            "PackageIdentifier",
+            "PackageVersion",
+            "PackageLocale",
+            "Publisher",
+            "PublisherUrl",
+            "PublisherSupportUrl",
+            "PrivacyUrl",
+            "Author",
+            "PackageName",
+            "PackageUrl",
+            "License",
+            "LicenseUrl",
+            "Copyright",
+            "CopyrightUrl",
+            "ShortDescription",
+            "Description",
+            "Moniker",
+            "Tags",
+            "Agreements",
+            "ReleaseNotes",
+            "ReleaseNotesUrl",
+            "PurchaseUrl",
+            "InstallationNotes",
+            "Documentations",
+            "Icons",
+        ],
+    );
+    default_locale_document.insert(
+        "PackageIdentifier".to_string(),
+        JsonValue::String(json_string(merged, "PackageIdentifier").unwrap_or_default()),
+    );
+    default_locale_document.insert(
+        "PackageVersion".to_string(),
+        JsonValue::String(json_string(merged, "PackageVersion").unwrap_or_default()),
+    );
+    default_locale_document.insert(
+        "PackageLocale".to_string(),
+        JsonValue::String(json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string())),
+    );
+    default_locale_document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("defaultLocale".to_string()),
+    );
+    default_locale_document.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string())),
+    );
+
+    let mut installer_document = project_manifest_document(
+        merged,
+        &[
+            "PackageIdentifier",
+            "PackageVersion",
+            "Channel",
+            "InstallerLocale",
+            "Platform",
+            "MinimumOSVersion",
+            "InstallerType",
+            "NestedInstallerType",
+            "NestedInstallerFiles",
+            "Scope",
+            "InstallModes",
+            "InstallerSwitches",
+            "InstallerSuccessCodes",
+            "ExpectedReturnCodes",
+            "UpgradeBehavior",
+            "Commands",
+            "Protocols",
+            "FileExtensions",
+            "Dependencies",
+            "PackageFamilyName",
+            "ProductCode",
+            "Capabilities",
+            "RestrictedCapabilities",
+            "Markets",
+            "InstallerAbortsTerminal",
+            "ReleaseDate",
+            "InstallLocationRequired",
+            "RequireExplicitUpgrade",
+            "DisplayInstallWarnings",
+            "UnsupportedOSArchitectures",
+            "UnsupportedArguments",
+            "AppsAndFeaturesEntries",
+            "ElevationRequirement",
+            "InstallationMetadata",
+            "DownloadCommandProhibited",
+            "RepairBehavior",
+            "ArchiveBinariesDependOnPath",
+            "Authentication",
+            "Installers",
+        ],
+    );
+    installer_document.insert(
+        "PackageIdentifier".to_string(),
+        JsonValue::String(json_string(merged, "PackageIdentifier").unwrap_or_default()),
+    );
+    installer_document.insert(
+        "PackageVersion".to_string(),
+        JsonValue::String(json_string(merged, "PackageVersion").unwrap_or_default()),
+    );
+    installer_document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("installer".to_string()),
+    );
+    installer_document.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string())),
+    );
+
+    vec![
+        version_document,
+        JsonValue::Object(default_locale_document),
+        JsonValue::Object(installer_document),
+    ]
+}
+
+fn project_manifest_document(source: &JsonValue, keys: &[&str]) -> JsonMap<String, JsonValue> {
+    let mut result = JsonMap::new();
+    if let Some(source) = source.as_object() {
+        for key in keys {
+            if let Some(value) = source.get(*key) {
+                result.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+
+    result
 }
 
 fn copy_manifest_keys(target: &mut JsonMap<String, JsonValue>, source: Option<&JsonValue>, keys: &[&str]) {
@@ -5222,6 +5371,85 @@ Installers:
         assert_eq!(documents["ManifestType"].as_str(), Some("singleton"));
         assert_eq!(documents["PackageIdentifier"].as_str(), Some("Test.Package"));
         assert_eq!(documents["PackageName"].as_str(), Some("Test Package"));
+    }
+
+    #[test]
+    fn collapse_structured_documents_returns_plural_show_documents() {
+        let documents = collapse_structured_documents(&[
+            JsonValue::Array(vec![
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package.One",
+                    "PackageVersion": "1.0.0",
+                    "DefaultLocale": "en-US",
+                    "ManifestType": "version",
+                    "ManifestVersion": "1.10.0"
+                }),
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package.One",
+                    "PackageVersion": "1.0.0",
+                    "PackageLocale": "en-US",
+                    "PackageName": "Test Package One",
+                    "ManifestType": "defaultLocale",
+                    "ManifestVersion": "1.10.0"
+                }),
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package.One",
+                    "PackageVersion": "1.0.0",
+                    "ManifestType": "installer",
+                    "ManifestVersion": "1.10.0",
+                    "Installers": [
+                        {
+                            "Architecture": "x64",
+                            "InstallerType": "exe",
+                            "InstallerUrl": "https://example.test/one.exe",
+                            "InstallerSha256": "ABC123"
+                        }
+                    ]
+                }),
+            ]),
+            serde_json::json!({
+                "PackageIdentifier": "Test.Package.Two",
+                "PackageVersion": "2.0.0",
+                "PackageLocale": "en-US",
+                "PackageName": "Test Package Two",
+                "ManifestType": "singleton",
+                "ManifestVersion": "1.12.0"
+            }),
+        ]);
+
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0]["ManifestType"].as_str(), Some("singleton"));
+        assert_eq!(documents[0]["PackageIdentifier"].as_str(), Some("Test.Package.One"));
+        assert_eq!(documents[0]["PackageName"].as_str(), Some("Test Package One"));
+        assert_eq!(documents[1]["ManifestType"].as_str(), Some("singleton"));
+        assert_eq!(documents[1]["PackageIdentifier"].as_str(), Some("Test.Package.Two"));
+    }
+
+    #[test]
+    fn collapse_structured_document_projects_merged_manifest() {
+        let document = collapse_structured_document(&serde_json::json!({
+            "PackageIdentifier": "Test.Package",
+            "PackageVersion": "1.2.3",
+            "PackageLocale": "en-US",
+            "PackageName": "Test Package",
+            "Publisher": "Example",
+            "InstallerType": "exe",
+            "Installers": [
+                {
+                    "Architecture": "x64",
+                    "InstallerUrl": "https://example.test/Test.Package.exe",
+                    "InstallerSha256": "ABC123"
+                }
+            ],
+            "ManifestType": "merged",
+            "ManifestVersion": "1.10.0"
+        }));
+
+        assert_eq!(document["ManifestType"].as_str(), Some("singleton"));
+        assert_eq!(document["PackageIdentifier"].as_str(), Some("Test.Package"));
+        assert_eq!(document["PackageName"].as_str(), Some("Test Package"));
+        assert_eq!(document["InstallerType"].as_str(), Some("exe"));
+        assert_eq!(document["Installers"][0]["Architecture"].as_str(), Some("x64"));
     }
 
     #[test]
