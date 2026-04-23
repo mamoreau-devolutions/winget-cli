@@ -123,7 +123,7 @@ public class Repository : IDisposable
     public ShowResult Show(PackageQuery query)
     {
         var (located, warnings) = FindSingleMatch(query);
-        var (manifest, cachedFiles) = ManifestForMatch(located, query);
+        var (manifest, structuredDocument, cachedFiles) = ManifestForMatch(located, query);
         var selectedInstaller = SelectInstaller(manifest.Installers, query);
 
         return new ShowResult
@@ -133,6 +133,7 @@ public class Repository : IDisposable
             SelectedInstaller = selectedInstaller,
             CachedFiles = cachedFiles,
             Warnings = warnings,
+            StructuredDocument = structuredDocument,
         };
     }
 
@@ -155,7 +156,7 @@ public class Repository : IDisposable
     public CacheWarmResult WarmCache(PackageQuery query)
     {
         var (located, warnings) = FindSingleMatch(query);
-        var (_, cachedFiles) = ManifestForMatch(located, query);
+        var (_, _, cachedFiles) = ManifestForMatch(located, query);
         return new CacheWarmResult { Package = located.Display, CachedFiles = cachedFiles, Warnings = warnings };
     }
 
@@ -374,7 +375,7 @@ public class Repository : IDisposable
             return LoadManifestFromPath(request.ManifestPath!);
 
         var (located, _) = FindSingleMatch(request.Query);
-        var (manifest, _) = ManifestForMatch(located, request.Query);
+        var (manifest, _, _) = ManifestForMatch(located, request.Query);
         return manifest;
     }
 
@@ -662,7 +663,7 @@ public class Repository : IDisposable
         return entries.Select(e => new VersionKey { Version = e.Version, Channel = "" }).ToList();
     }
 
-    private (Manifest Manifest, List<string> CachedFiles) ManifestForMatch(LocatedMatch located, PackageQuery query)
+    private (Manifest Manifest, object StructuredDocument, List<string> CachedFiles) ManifestForMatch(LocatedMatch located, PackageQuery query)
     {
         return located.Locator switch
         {
@@ -673,7 +674,7 @@ public class Repository : IDisposable
         };
     }
 
-    private (Manifest, List<string>) ManifestFromV1(int sourceIndex, long packageRowid, PackageQuery query)
+    private (Manifest, object, List<string>) ManifestFromV1(int sourceIndex, long packageRowid, PackageQuery query)
     {
         var conn = OpenPreindexedConnection(sourceIndex);
         var source = _store.Sources[sourceIndex];
@@ -682,11 +683,12 @@ public class Repository : IDisposable
         var relativePath = PreIndexedSource.ResolveV1RelativePath(conn, selected.PathPart);
         var bytes = PreIndexedSource.GetCachedSourceFile(_client, "V1_M", source, relativePath, selected.ManifestHash);
         var manifest = ParseYamlManifest(bytes);
+        var structuredDocument = ParseYamlManifestDocuments(bytes);
         manifest = manifest with { Version = selected.Version, Channel = selected.Channel };
-        return (manifest, []);
+        return (manifest, structuredDocument, []);
     }
 
-    private (Manifest, List<string>) ManifestFromV2(int sourceIndex, long packageRowid, string packageHash, PackageQuery query)
+    private (Manifest, object, List<string>) ManifestFromV2(int sourceIndex, long packageRowid, string packageHash, PackageQuery query)
     {
         var source = _store.Sources[sourceIndex];
         var conn = OpenPreindexedConnection(sourceIndex);
@@ -694,17 +696,18 @@ public class Repository : IDisposable
         var selected = SelectV2Version(entries, query.Version);
         var bytes = PreIndexedSource.GetCachedSourceFile(_client, "V2_M", source, selected.ManifestRelativePath, selected.ManifestHash);
         var manifest = ParseYamlManifest(bytes);
+        var structuredDocument = ParseYamlManifestDocuments(bytes);
         manifest = manifest with { Version = selected.Version };
-        return (manifest, [vdFile]);
+        return (manifest, structuredDocument, [vdFile]);
     }
 
-    private (Manifest, List<string>) ManifestFromRest(int sourceIndex, string packageId, List<VersionKey> versions, PackageQuery query)
+    private (Manifest, object, List<string>) ManifestFromRest(int sourceIndex, string packageId, List<VersionKey> versions, PackageQuery query)
     {
         var source = _store.Sources[sourceIndex];
         var info = RestSource.LoadInformation(_client, source, _appRoot);
         var selected = SelectRestVersion(versions, query.Version, query.Channel);
-        var manifest = RestSource.FetchManifest(_client, source, info, packageId, selected.Version, selected.Channel);
-        return (manifest, []);
+        var (manifest, structuredDocument) = RestSource.FetchManifestWithDocuments(_client, source, info, packageId, selected.Version, selected.Channel);
+        return (manifest, structuredDocument, []);
     }
 
     // ── Version selection ──
@@ -789,6 +792,36 @@ public class Repository : IDisposable
     }
 
     // ── Manifest parsing ──
+
+    internal static object ParseYamlManifestDocuments(byte[] bytes)
+    {
+        var yaml = System.Text.Encoding.UTF8.GetString(bytes);
+        var deserializer = new DeserializerBuilder()
+            .IgnoreUnmatchedProperties()
+            .Build();
+
+        var documents = new List<Dictionary<string, object?>>();
+        var parser = new YamlDotNet.Core.Parser(new StringReader(yaml));
+        parser.Consume<YamlDotNet.Core.Events.StreamStart>();
+        while (parser.Accept<YamlDotNet.Core.Events.DocumentStart>(out _))
+        {
+            var doc = deserializer.Deserialize<object?>(parser);
+            if (NormalizeYamlValue(doc) is Dictionary<string, object?> normalized)
+                documents.Add(normalized);
+        }
+
+        if (documents.Count == 1 &&
+            documents[0].TryGetValue("ManifestType", out var manifestType) &&
+            string.Equals(manifestType?.ToString(), "merged", StringComparison.OrdinalIgnoreCase))
+        {
+            return SplitMergedManifestDocument(documents[0]);
+        }
+
+        if (documents.Count == 1)
+            return documents[0];
+
+        return documents;
+    }
 
     internal static Manifest ParseYamlManifest(byte[] bytes)
     {
@@ -924,6 +957,136 @@ public class Repository : IDisposable
             PackageDependencies = dependencies,
         };
     }
+
+    private static object? NormalizeYamlValue(object? value)
+    {
+        return value switch
+        {
+            null => null,
+            string or bool or byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal => value,
+            IList<object> list => list.Select(NormalizeYamlValue).ToList(),
+            IDictionary<object, object> dict => dict.ToDictionary(
+                kvp => kvp.Key.ToString() ?? "",
+                kvp => NormalizeYamlValue(kvp.Value),
+                StringComparer.OrdinalIgnoreCase),
+            _ => value.ToString(),
+        };
+    }
+
+    private static List<Dictionary<string, object?>> SplitMergedManifestDocument(Dictionary<string, object?> merged)
+    {
+        var packageIdentifier = GetDocumentString(merged, "PackageIdentifier") ?? "";
+        var packageVersion = GetDocumentString(merged, "PackageVersion") ?? "";
+        var packageLocale = GetDocumentString(merged, "PackageLocale") ?? "en-US";
+        var manifestVersion = GetDocumentString(merged, "ManifestVersion") ?? "1.10.0";
+
+        var versionDocument = new Dictionary<string, object?>
+        {
+            ["PackageIdentifier"] = packageIdentifier,
+            ["PackageVersion"] = packageVersion,
+            ["DefaultLocale"] = packageLocale,
+            ["ManifestType"] = "version",
+            ["ManifestVersion"] = manifestVersion,
+        };
+
+        var defaultLocaleDocument = ProjectDocument(merged,
+        [
+            "PackageIdentifier",
+            "PackageVersion",
+            "PackageLocale",
+            "Publisher",
+            "PublisherUrl",
+            "PublisherSupportUrl",
+            "PrivacyUrl",
+            "Author",
+            "PackageName",
+            "PackageUrl",
+            "License",
+            "LicenseUrl",
+            "Copyright",
+            "CopyrightUrl",
+            "ShortDescription",
+            "Description",
+            "Moniker",
+            "Tags",
+            "Agreements",
+            "ReleaseNotes",
+            "ReleaseNotesUrl",
+            "PurchaseUrl",
+            "InstallationNotes",
+            "Documentations",
+            "Icons",
+        ]);
+        defaultLocaleDocument["PackageIdentifier"] = packageIdentifier;
+        defaultLocaleDocument["PackageVersion"] = packageVersion;
+        defaultLocaleDocument["PackageLocale"] = packageLocale;
+        defaultLocaleDocument["ManifestType"] = "defaultLocale";
+        defaultLocaleDocument["ManifestVersion"] = manifestVersion;
+
+        var installerDocument = ProjectDocument(merged,
+        [
+            "PackageIdentifier",
+            "PackageVersion",
+            "Channel",
+            "InstallerLocale",
+            "Platform",
+            "MinimumOSVersion",
+            "InstallerType",
+            "NestedInstallerType",
+            "NestedInstallerFiles",
+            "Scope",
+            "InstallModes",
+            "InstallerSwitches",
+            "InstallerSuccessCodes",
+            "ExpectedReturnCodes",
+            "UpgradeBehavior",
+            "Commands",
+            "Protocols",
+            "FileExtensions",
+            "Dependencies",
+            "PackageFamilyName",
+            "ProductCode",
+            "Capabilities",
+            "RestrictedCapabilities",
+            "Markets",
+            "InstallerAbortsTerminal",
+            "ReleaseDate",
+            "InstallLocationRequired",
+            "RequireExplicitUpgrade",
+            "DisplayInstallWarnings",
+            "UnsupportedOSArchitectures",
+            "UnsupportedArguments",
+            "AppsAndFeaturesEntries",
+            "ElevationRequirement",
+            "InstallationMetadata",
+            "DownloadCommandProhibited",
+            "RepairBehavior",
+            "ArchiveBinariesDependOnPath",
+            "Authentication",
+            "Installers",
+        ]);
+        installerDocument["PackageIdentifier"] = packageIdentifier;
+        installerDocument["PackageVersion"] = packageVersion;
+        installerDocument["ManifestType"] = "installer";
+        installerDocument["ManifestVersion"] = manifestVersion;
+
+        return [versionDocument, defaultLocaleDocument, installerDocument];
+    }
+
+    private static Dictionary<string, object?> ProjectDocument(Dictionary<string, object?> source, IEnumerable<string> keys)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in keys)
+        {
+            if (source.TryGetValue(key, out var value))
+                result[key] = value;
+        }
+
+        return result;
+    }
+
+    private static string? GetDocumentString(Dictionary<string, object?> source, string key) =>
+        source.TryGetValue(key, out var value) ? value?.ToString() : null;
 
     private static List<PackageAgreement> ReadAgreements(IDictionary<object, object> values)
     {

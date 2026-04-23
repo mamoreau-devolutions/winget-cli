@@ -164,28 +164,128 @@ public class ModelsTests
             },
             CachedFiles = [@"C:\temp\cache\Test.Package.yaml"],
             Warnings = ["cache warmed"],
+            StructuredDocument = new List<Dictionary<string, object?>>
+            {
+                new Dictionary<string, object?>
+                {
+                    ["PackageIdentifier"] = "Test.Package",
+                    ["PackageVersion"] = "1.2.3",
+                    ["DefaultLocale"] = "en-US",
+                    ["ManifestType"] = "version",
+                    ["ManifestVersion"] = "1.10.0",
+                },
+                new Dictionary<string, object?>
+                {
+                    ["PackageIdentifier"] = "Test.Package",
+                    ["PackageVersion"] = "1.2.3",
+                    ["PackageLocale"] = "en-US",
+                    ["PackageName"] = "Test Package",
+                    ["Publisher"] = "Example",
+                    ["License"] = "MIT",
+                    ["ShortDescription"] = "Structured output",
+                    ["ManifestType"] = "defaultLocale",
+                    ["ManifestVersion"] = "1.10.0",
+                },
+                new Dictionary<string, object?>
+                {
+                    ["PackageIdentifier"] = "Test.Package",
+                    ["PackageVersion"] = "1.2.3",
+                    ["ManifestType"] = "installer",
+                    ["ManifestVersion"] = "1.10.0",
+                    ["Installers"] = new List<Dictionary<string, object?>>
+                    {
+                        new()
+                        {
+                            ["Architecture"] = "x64",
+                            ["InstallerType"] = "msix",
+                            ["InstallerUrl"] = "https://example.test/Test.Package.msix",
+                            ["InstallerSha256"] = "ABC123",
+                            ["Commands"] = new List<string> { "testpkg" },
+                            ["InstallerSwitches"] = new Dictionary<string, object?> { ["Silent"] = "/quiet" },
+                            ["Dependencies"] = new Dictionary<string, object?>
+                            {
+                                ["PackageDependencies"] = new List<Dictionary<string, object?>>
+                                {
+                                    new() { ["PackageIdentifier"] = "Microsoft.VCRedist.2015+.x64" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         };
 
-        var document = result.ToStructuredDocument();
-        var package = Assert.IsType<Dictionary<string, object?>>(document["Package"]);
-        var manifest = Assert.IsType<Dictionary<string, object?>>(document["Manifest"]);
-        var selectedInstaller = Assert.IsType<Dictionary<string, object?>>(document["SelectedInstaller"]);
-        var cachedFiles = Assert.IsType<List<string>>(document["CachedFiles"]);
-        var warnings = Assert.IsType<List<string>>(document["Warnings"]);
+        var document = Assert.IsType<Dictionary<string, object?>>(result.ToStructuredDocument());
+        Assert.Equal("singleton", document["ManifestType"]);
+        Assert.Equal("1.10.0", document["ManifestVersion"]);
+        Assert.Equal("en-US", document["PackageLocale"]);
 
-        Assert.Equal("Test.Package", package["PackageIdentifier"]);
-        Assert.Equal("1.2.3", manifest["PackageVersion"]);
-
-        var dependencies = Assert.IsType<Dictionary<string, object?>>(manifest["Dependencies"]);
+        var installers = Assert.IsType<List<Dictionary<string, object?>>>(document["Installers"]);
+        var selectedInstaller = installers[0];
+        var dependencies = Assert.IsType<Dictionary<string, object?>>(selectedInstaller["Dependencies"]);
         var packageDependencies = Assert.IsType<List<Dictionary<string, object?>>>(dependencies["PackageDependencies"]);
         Assert.Equal("Microsoft.VCRedist.2015+.x64", packageDependencies[0]["PackageIdentifier"]);
-
         var commands = Assert.IsType<List<string>>(selectedInstaller["Commands"]);
         Assert.Equal("testpkg", commands[0]);
         var switches = Assert.IsType<Dictionary<string, object?>>(selectedInstaller["InstallerSwitches"]);
         Assert.Equal("/quiet", switches["Silent"]);
-        Assert.Equal(@"C:\temp\cache\Test.Package.yaml", cachedFiles[0]);
-        Assert.Equal("cache warmed", warnings[0]);
+    }
+
+    [Fact]
+    public void ParseYamlManifestDocuments_PreservesManifestDocuments()
+    {
+        var yaml = """
+            PackageIdentifier: Test.Package
+            PackageVersion: 1.2.3
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.10.0
+            ---
+            PackageIdentifier: Test.Package
+            PackageVersion: 1.2.3
+            PackageLocale: en-US
+            PackageName: Test Package
+            Publisher: Example
+            License: MIT
+            ShortDescription: Structured output
+            ManifestType: defaultLocale
+            ManifestVersion: 1.10.0
+            ---
+            PackageIdentifier: Test.Package
+            PackageVersion: 1.2.3
+            ManifestType: installer
+            ManifestVersion: 1.10.0
+            Installers:
+              - Architecture: x64
+                InstallerType: exe
+                InstallerUrl: https://example.test/Test.Package.exe
+                InstallerSha256: ABC123
+            """;
+
+        var documents = Assert.IsType<List<Dictionary<string, object?>>>(Repository.ParseYamlManifestDocuments(System.Text.Encoding.UTF8.GetBytes(yaml)));
+        var document = new ShowResult
+        {
+            Package = new SearchMatch
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                SourceName = "winget",
+                SourceKind = SourceKind.PreIndexed,
+            },
+            Manifest = new Manifest
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                Version = "1.2.3",
+                Installers = [],
+            },
+            StructuredDocument = documents,
+        }.ToStructuredDocument();
+
+        var collapsed = Assert.IsType<Dictionary<string, object?>>(document);
+        Assert.Equal("singleton", collapsed["ManifestType"]);
+        Assert.Equal("Test.Package", collapsed["PackageIdentifier"]);
+        Assert.Equal("Test Package", collapsed["PackageName"]);
     }
 
     [Fact]

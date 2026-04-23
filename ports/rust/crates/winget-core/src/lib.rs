@@ -349,40 +349,24 @@ pub struct ShowResult {
     pub selected_installer: Option<Installer>,
     pub cached_files: Vec<PathBuf>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing)]
+    manifest_documents: JsonValue,
 }
 
 impl ShowResult {
     pub fn structured_document(&self) -> JsonValue {
-        let mut root = JsonMap::new();
-        root.insert("Package".to_string(), self.package.structured_document(&self.manifest));
-        root.insert("Manifest".to_string(), self.manifest.structured_document());
-        root.insert(
-            "SelectedInstaller".to_string(),
-            self.selected_installer
-                .as_ref()
-                .map(Installer::structured_document)
-                .unwrap_or(JsonValue::Null),
-        );
-        root.insert(
-            "CachedFiles".to_string(),
-            JsonValue::Array(
-                self.cached_files
-                    .iter()
-                    .map(|path| JsonValue::String(path.display().to_string()))
-                    .collect(),
-            ),
-        );
-        root.insert(
-            "Warnings".to_string(),
-            JsonValue::Array(
-                self.warnings
-                    .iter()
-                    .cloned()
-                    .map(JsonValue::String)
-                    .collect(),
-            ),
-        );
-        JsonValue::Object(root)
+        match &self.manifest_documents {
+            JsonValue::Array(documents) => merge_manifest_documents(documents),
+            JsonValue::Object(document)
+                if document
+                    .get("ManifestType")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("merged")) =>
+            {
+                merged_manifest_to_singleton(&self.manifest_documents)
+            }
+            _ => self.manifest_documents.clone(),
+        }
     }
 }
 
@@ -443,216 +427,6 @@ pub struct InstallResult {
     pub success: bool,
 }
 
-impl SearchMatch {
-    fn structured_document(&self, manifest: &Manifest) -> JsonValue {
-        let mut object = JsonMap::new();
-        object.insert(
-            "PackageIdentifier".to_string(),
-            JsonValue::String(self.id.clone()),
-        );
-        object.insert("PackageName".to_string(), JsonValue::String(self.name.clone()));
-        object.insert(
-            "SourceName".to_string(),
-            JsonValue::String(self.source_name.clone()),
-        );
-        object.insert(
-            "SourceKind".to_string(),
-            JsonValue::String(self.source_kind.to_string()),
-        );
-        object.insert(
-            "PackageVersion".to_string(),
-            JsonValue::String(manifest.version.clone()),
-        );
-        if !manifest.channel.is_empty() {
-            object.insert(
-                "Channel".to_string(),
-                JsonValue::String(manifest.channel.clone()),
-            );
-        }
-        if let Some(criteria) = &self.match_criteria {
-            object.insert(
-                "MatchCriteria".to_string(),
-                JsonValue::String(criteria.clone()),
-            );
-        }
-        JsonValue::Object(object)
-    }
-}
-
-impl Manifest {
-    fn structured_document(&self) -> JsonValue {
-        let mut object = JsonMap::new();
-        object.insert(
-            "PackageIdentifier".to_string(),
-            JsonValue::String(self.id.clone()),
-        );
-        object.insert("PackageName".to_string(), JsonValue::String(self.name.clone()));
-        object.insert(
-            "PackageVersion".to_string(),
-            JsonValue::String(self.version.clone()),
-        );
-        insert_json_string(&mut object, "Channel", self.channel.as_str());
-        insert_optional_json_string(&mut object, "Publisher", self.publisher.as_deref());
-        insert_optional_json_string(&mut object, "Description", self.description.as_deref());
-        insert_optional_json_string(&mut object, "Moniker", self.moniker.as_deref());
-        insert_optional_json_string(&mut object, "PackageUrl", self.package_url.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "PublisherUrl",
-            self.publisher_url.as_deref(),
-        );
-        insert_optional_json_string(
-            &mut object,
-            "PublisherSupportUrl",
-            self.publisher_support_url.as_deref(),
-        );
-        insert_optional_json_string(&mut object, "License", self.license.as_deref());
-        insert_optional_json_string(&mut object, "LicenseUrl", self.license_url.as_deref());
-        insert_optional_json_string(&mut object, "PrivacyUrl", self.privacy_url.as_deref());
-        insert_optional_json_string(&mut object, "Author", self.author.as_deref());
-        insert_optional_json_string(&mut object, "Copyright", self.copyright.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "CopyrightUrl",
-            self.copyright_url.as_deref(),
-        );
-        insert_optional_json_string(
-            &mut object,
-            "ReleaseNotes",
-            self.release_notes.as_deref(),
-        );
-        insert_optional_json_string(
-            &mut object,
-            "ReleaseNotesUrl",
-            self.release_notes_url.as_deref(),
-        );
-        object.insert(
-            "Tags".to_string(),
-            JsonValue::Array(
-                self.tags
-                    .iter()
-                    .cloned()
-                    .map(JsonValue::String)
-                    .collect(),
-            ),
-        );
-        object.insert(
-            "Agreements".to_string(),
-            JsonValue::Array(
-                self.agreements
-                    .iter()
-                    .map(PackageAgreement::structured_document)
-                    .collect(),
-            ),
-        );
-        if !self.package_dependencies.is_empty() {
-            object.insert(
-                "Dependencies".to_string(),
-                package_dependencies_document(&self.package_dependencies),
-            );
-        }
-        object.insert(
-            "Documentations".to_string(),
-            JsonValue::Array(
-                self.documentation
-                    .iter()
-                    .map(Documentation::structured_document)
-                    .collect(),
-            ),
-        );
-        object.insert(
-            "Installers".to_string(),
-            JsonValue::Array(
-                self.installers
-                    .iter()
-                    .map(Installer::structured_document)
-                    .collect(),
-            ),
-        );
-        JsonValue::Object(object)
-    }
-}
-
-impl Documentation {
-    fn structured_document(&self) -> JsonValue {
-        let mut object = JsonMap::new();
-        insert_optional_json_string(&mut object, "DocumentLabel", self.label.as_deref());
-        object.insert("DocumentUrl".to_string(), JsonValue::String(self.url.clone()));
-        JsonValue::Object(object)
-    }
-}
-
-impl PackageAgreement {
-    fn structured_document(&self) -> JsonValue {
-        let mut object = JsonMap::new();
-        insert_optional_json_string(&mut object, "AgreementLabel", self.label.as_deref());
-        insert_optional_json_string(&mut object, "Agreement", self.text.as_deref());
-        insert_optional_json_string(&mut object, "AgreementUrl", self.url.as_deref());
-        JsonValue::Object(object)
-    }
-}
-
-impl Installer {
-    fn structured_document(&self) -> JsonValue {
-        let mut object = JsonMap::new();
-        insert_optional_json_string(
-            &mut object,
-            "Architecture",
-            self.architecture.as_deref(),
-        );
-        insert_optional_json_string(
-            &mut object,
-            "InstallerType",
-            self.installer_type.as_deref(),
-        );
-        insert_optional_json_string(&mut object, "InstallerUrl", self.url.as_deref());
-        insert_optional_json_string(&mut object, "InstallerSha256", self.sha256.as_deref());
-        insert_optional_json_string(&mut object, "ProductCode", self.product_code.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "InstallerLocale",
-            self.locale.as_deref(),
-        );
-        insert_optional_json_string(&mut object, "Scope", self.scope.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "ReleaseDate",
-            self.release_date.as_deref(),
-        );
-        insert_optional_json_string(
-            &mut object,
-            "PackageFamilyName",
-            self.package_family_name.as_deref(),
-        );
-        insert_optional_json_string(&mut object, "UpgradeCode", self.upgrade_code.as_deref());
-        if !self.commands.is_empty() {
-            object.insert(
-                "Commands".to_string(),
-                JsonValue::Array(
-                    self.commands
-                        .iter()
-                        .cloned()
-                        .map(JsonValue::String)
-                        .collect(),
-                ),
-            );
-        }
-        if !self.package_dependencies.is_empty() {
-            object.insert(
-                "Dependencies".to_string(),
-                package_dependencies_document(&self.package_dependencies),
-            );
-        }
-        if !self.switches.is_empty() {
-            object.insert(
-                "InstallerSwitches".to_string(),
-                self.switches.structured_document(),
-            );
-        }
-        JsonValue::Object(object)
-    }
-}
-
 impl InstallerSwitches {
     fn with_fallback(&self, fallback: &Self) -> Self {
         Self {
@@ -673,72 +447,6 @@ impl InstallerSwitches {
                 .or_else(|| fallback.install_location.clone()),
         }
     }
-
-    fn is_empty(&self) -> bool {
-        self.silent.is_none()
-            && self.silent_with_progress.is_none()
-            && self.interactive.is_none()
-            && self.custom.is_none()
-            && self.log.is_none()
-            && self.install_location.is_none()
-    }
-
-    fn structured_document(&self) -> JsonValue {
-        let mut object = JsonMap::new();
-        insert_optional_json_string(&mut object, "Silent", self.silent.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "SilentWithProgress",
-            self.silent_with_progress.as_deref(),
-        );
-        insert_optional_json_string(&mut object, "Interactive", self.interactive.as_deref());
-        insert_optional_json_string(&mut object, "Custom", self.custom.as_deref());
-        insert_optional_json_string(&mut object, "Log", self.log.as_deref());
-        insert_optional_json_string(
-            &mut object,
-            "InstallLocation",
-            self.install_location.as_deref(),
-        );
-        JsonValue::Object(object)
-    }
-}
-
-fn insert_json_string(target: &mut JsonMap<String, JsonValue>, key: &str, value: &str) {
-    if !value.is_empty() {
-        target.insert(key.to_string(), JsonValue::String(value.to_string()));
-    }
-}
-
-fn insert_optional_json_string(
-    target: &mut JsonMap<String, JsonValue>,
-    key: &str,
-    value: Option<&str>,
-) {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        target.insert(key.to_string(), JsonValue::String(value.to_string()));
-    }
-}
-
-fn package_dependencies_document(package_ids: &[String]) -> JsonValue {
-    let mut dependencies = JsonMap::new();
-    dependencies.insert(
-        "PackageDependencies".to_string(),
-        JsonValue::Array(
-            package_ids
-                .iter()
-                .cloned()
-                .map(|package_id| {
-                    let mut dependency = JsonMap::new();
-                    dependency.insert(
-                        "PackageIdentifier".to_string(),
-                        JsonValue::String(package_id),
-                    );
-                    JsonValue::Object(dependency)
-                })
-                .collect(),
-        ),
-    );
-    JsonValue::Object(dependencies)
 }
 
 #[derive(Debug, Clone)]
@@ -1074,7 +782,7 @@ impl Repository {
 
     pub fn show(&mut self, query: &PackageQuery) -> Result<ShowResult> {
         let (located, warnings) = self.find_single_match(query)?;
-        let (manifest, cached_files) = self.manifest_for_match(&located, query)?;
+        let (manifest, manifest_documents, cached_files) = self.manifest_for_match(&located, query)?;
         let selected_installer = select_installer(&manifest.installers, query);
 
         Ok(ShowResult {
@@ -1083,12 +791,13 @@ impl Repository {
             selected_installer,
             cached_files,
             warnings,
+            manifest_documents,
         })
     }
 
     pub fn warm_cache(&mut self, query: &PackageQuery) -> Result<CacheWarmResult> {
         let (located, warnings) = self.find_single_match(query)?;
-        let (_, cached_files) = self.manifest_for_match(&located, query)?;
+        let (_, _, cached_files) = self.manifest_for_match(&located, query)?;
 
         Ok(CacheWarmResult {
             package: located.display,
@@ -1364,7 +1073,7 @@ impl Repository {
         }
 
         let (located, _warnings) = self.find_single_match(&request.query)?;
-        let (manifest, _cached_files) = self.manifest_for_match(&located, &request.query)?;
+        let (manifest, _, _cached_files) = self.manifest_for_match(&located, &request.query)?;
         Ok(manifest)
     }
 
@@ -1623,7 +1332,7 @@ impl Repository {
         &mut self,
         located: &LocatedMatch,
         query: &PackageQuery,
-    ) -> Result<(Manifest, Vec<PathBuf>)> {
+    ) -> Result<(Manifest, JsonValue, Vec<PathBuf>)> {
         match &located.locator {
             MatchLocator::PreIndexedV1 { package_rowid } => {
                 let source = self.source_clone(located.source_index);
@@ -1641,10 +1350,10 @@ impl Repository {
                     &relative_path,
                     selected.manifest_hash.as_deref(),
                 )?;
-                let mut manifest = parse_yaml_manifest(&bytes.bytes)?;
+                let (mut manifest, manifest_documents) = parse_yaml_manifest_bundle(&bytes.bytes)?;
                 manifest.version = selected.version.clone();
                 manifest.channel = selected.channel.clone();
-                Ok((manifest, vec![bytes.path]))
+                Ok((manifest, manifest_documents, vec![bytes.path]))
             }
             MatchLocator::PreIndexedV2 {
                 package_rowid,
@@ -1660,9 +1369,14 @@ impl Repository {
                     &selected.manifest_relative_path,
                     Some(selected.manifest_hash.as_str()),
                 )?;
-                let mut manifest = parse_yaml_manifest(&manifest_bytes.bytes)?;
+                let (mut manifest, manifest_documents) =
+                    parse_yaml_manifest_bundle(&manifest_bytes.bytes)?;
                 manifest.version = selected.version.clone();
-                Ok((manifest, vec![version_data_file, manifest_bytes.path]))
+                Ok((
+                    manifest,
+                    manifest_documents,
+                    vec![version_data_file, manifest_bytes.path],
+                ))
             }
             MatchLocator::Rest {
                 package_id,
@@ -1680,9 +1394,9 @@ impl Repository {
                     &selected.version,
                     &selected.channel,
                 )?;
-                let manifest =
+                let (manifest, manifest_documents) =
                     parse_rest_manifest(&bytes, package_id, &selected.version, &selected.channel)?;
-                Ok((manifest, vec![cache_path]))
+                Ok((manifest, manifest_documents, vec![cache_path]))
             }
         }
     }
@@ -3717,11 +3431,15 @@ fn parse_rest_versions(item: &JsonValue) -> Result<Vec<VersionKey>> {
     Ok(result)
 }
 
-fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
+fn parse_yaml_manifest_bundle(bytes: &[u8]) -> Result<(Manifest, JsonValue)> {
     let mut merged = YamlMapping::new();
+    let mut documents = Vec::new();
     for document in serde_yaml::Deserializer::from_slice(bytes) {
         let value =
             YamlValue::deserialize(document).context("failed to deserialize YAML document")?;
+        documents.push(
+            serde_json::to_value(&value).context("failed to convert YAML manifest document")?,
+        );
         if let Some(mapping) = value.as_mapping() {
             merge_yaml_mapping(&mut merged, mapping);
         }
@@ -3736,7 +3454,8 @@ fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
 
     let installers = parse_yaml_installers(&merged);
 
-    Ok(Manifest {
+    Ok((
+        Manifest {
         id,
         name,
         version,
@@ -3761,7 +3480,13 @@ fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
         package_dependencies: yaml_package_dependencies(&merged),
         documentation: yaml_documentation_list(&merged),
         installers,
-    })
+        },
+        collapse_manifest_documents(documents),
+    ))
+}
+
+fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
+    parse_yaml_manifest_bundle(bytes).map(|(manifest, _)| manifest)
 }
 
 fn parse_rest_manifest(
@@ -3769,7 +3494,7 @@ fn parse_rest_manifest(
     package_id: &str,
     version: &str,
     channel: &str,
-) -> Result<Manifest> {
+) -> Result<(Manifest, JsonValue)> {
     let root = serde_json::from_slice::<JsonValue>(bytes)
         .context("failed to deserialize REST manifest JSON")?;
     let data = root
@@ -3821,7 +3546,7 @@ fn parse_rest_manifest(
         })
         .unwrap_or_default();
 
-    Ok(Manifest {
+    let manifest = Manifest {
         id: package_id.to_string(),
         name,
         version: version.to_string(),
@@ -3846,7 +3571,221 @@ fn parse_rest_manifest(
         package_dependencies: json_package_dependencies(selected),
         documentation: json_documentation_list(default_locale),
         installers,
-    })
+    };
+
+    Ok((
+        manifest,
+        build_rest_manifest_documents(data, selected, default_locale, package_id, version, channel),
+    ))
+}
+
+fn collapse_manifest_documents(documents: Vec<JsonValue>) -> JsonValue {
+    if documents.len() == 1 {
+        let document = documents.into_iter().next().unwrap_or(JsonValue::Null);
+        if document
+            .get("ManifestType")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("merged"))
+        {
+            merged_manifest_to_singleton(&document)
+        } else {
+            document
+        }
+    } else {
+        merge_manifest_documents(&documents)
+    }
+}
+
+fn merged_manifest_to_singleton(merged: &JsonValue) -> JsonValue {
+    let mut document = merged.as_object().cloned().unwrap_or_else(JsonMap::new);
+    document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("singleton".to_string()),
+    );
+    JsonValue::Object(document)
+}
+
+fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
+    let version = documents.iter().find(|document| {
+        document
+            .get("ManifestType")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("version"))
+    });
+    let default_locale = documents.iter().find(|document| {
+        document
+            .get("ManifestType")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("defaultLocale"))
+    });
+    let installer = documents.iter().find(|document| {
+        document
+            .get("ManifestType")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|manifest_type| manifest_type.eq_ignore_ascii_case("installer"))
+    });
+
+    let mut singleton = JsonMap::new();
+    copy_manifest_keys(
+        &mut singleton,
+        version,
+        &["PackageIdentifier", "PackageVersion"],
+    );
+    copy_all_manifest_keys_except(&mut singleton, default_locale, &["ManifestType", "ManifestVersion"]);
+    copy_all_manifest_keys_except(&mut singleton, installer, &["ManifestType", "ManifestVersion"]);
+
+    if !singleton.contains_key("PackageLocale") {
+        if let Some(package_locale) = default_locale
+            .and_then(|document| json_string(document, "PackageLocale"))
+            .or_else(|| version.and_then(|document| json_string(document, "DefaultLocale")))
+        {
+            singleton.insert("PackageLocale".to_string(), JsonValue::String(package_locale));
+        }
+    }
+
+    singleton.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("singleton".to_string()),
+    );
+    singleton.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(
+            installer
+                .and_then(|document| json_string(document, "ManifestVersion"))
+                .or_else(|| default_locale.and_then(|document| json_string(document, "ManifestVersion")))
+                .or_else(|| version.and_then(|document| json_string(document, "ManifestVersion")))
+                .unwrap_or_else(|| "1.10.0".to_string()),
+        ),
+    );
+    singleton.remove("DefaultLocale");
+
+    JsonValue::Object(singleton)
+}
+
+fn copy_manifest_keys(target: &mut JsonMap<String, JsonValue>, source: Option<&JsonValue>, keys: &[&str]) {
+    if let Some(source) = source.and_then(JsonValue::as_object) {
+        for key in keys {
+            if let Some(value) = source.get(*key) {
+                target.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+}
+
+fn copy_all_manifest_keys_except(
+    target: &mut JsonMap<String, JsonValue>,
+    source: Option<&JsonValue>,
+    excluded_keys: &[&str],
+) {
+    if let Some(source) = source.and_then(JsonValue::as_object) {
+        for (key, value) in source {
+            if !excluded_keys.iter().any(|excluded| key.eq_ignore_ascii_case(excluded)) {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+fn build_rest_manifest_documents(
+    data: &JsonValue,
+    installer_source: &JsonValue,
+    default_locale: &JsonValue,
+    package_id: &str,
+    version: &str,
+    channel: &str,
+) -> JsonValue {
+    let package_identifier = json_string(data, "PackageIdentifier")
+        .unwrap_or_else(|| package_id.to_string());
+    let package_locale =
+        json_string(default_locale, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
+    let manifest_version = json_string(installer_source, "ManifestVersion")
+        .or_else(|| json_string(default_locale, "ManifestVersion"))
+        .or_else(|| json_string(data, "ManifestVersion"))
+        .unwrap_or_else(|| "1.10.0".to_string());
+
+    let mut version_document = JsonMap::new();
+    version_document.insert(
+        "PackageIdentifier".to_string(),
+        JsonValue::String(package_identifier.clone()),
+    );
+    version_document.insert(
+        "PackageVersion".to_string(),
+        JsonValue::String(version.to_string()),
+    );
+    version_document.insert(
+        "DefaultLocale".to_string(),
+        JsonValue::String(package_locale.clone()),
+    );
+    version_document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("version".to_string()),
+    );
+    version_document.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(manifest_version.clone()),
+    );
+
+    let mut default_locale_document = default_locale
+        .as_object()
+        .cloned()
+        .unwrap_or_else(JsonMap::new);
+    default_locale_document.insert(
+        "PackageIdentifier".to_string(),
+        JsonValue::String(package_identifier.clone()),
+    );
+    default_locale_document.insert(
+        "PackageVersion".to_string(),
+        JsonValue::String(version.to_string()),
+    );
+    default_locale_document.insert(
+        "PackageLocale".to_string(),
+        JsonValue::String(package_locale),
+    );
+    default_locale_document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("defaultLocale".to_string()),
+    );
+    default_locale_document.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(manifest_version.clone()),
+    );
+
+    let mut installer_document = installer_source
+        .as_object()
+        .cloned()
+        .unwrap_or_else(JsonMap::new);
+    installer_document.remove("DefaultLocale");
+    installer_document.remove("Locales");
+    installer_document.insert(
+        "PackageIdentifier".to_string(),
+        JsonValue::String(package_identifier.clone()),
+    );
+    installer_document.insert(
+        "PackageVersion".to_string(),
+        JsonValue::String(version.to_string()),
+    );
+    if !channel.is_empty() {
+        installer_document.insert(
+            "Channel".to_string(),
+            JsonValue::String(channel.to_string()),
+        );
+    }
+    installer_document.insert(
+        "ManifestType".to_string(),
+        JsonValue::String("installer".to_string()),
+    );
+    installer_document.insert(
+        "ManifestVersion".to_string(),
+        JsonValue::String(manifest_version.clone()),
+    );
+
+    let documents = vec![
+        JsonValue::Object(version_document),
+        JsonValue::Object(default_locale_document),
+        JsonValue::Object(installer_document),
+    ];
+
+    merge_manifest_documents(&documents)
 }
 
 fn parse_yaml_installers(root: &YamlMapping) -> Vec<Installer> {
@@ -5185,36 +5124,104 @@ mod tests {
             }),
             cached_files: vec![PathBuf::from(r"C:\temp\cache\Test.Package.yaml")],
             warnings: vec!["cache warmed".to_string()],
+            manifest_documents: JsonValue::Array(vec![
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package",
+                    "PackageVersion": "1.2.3",
+                    "DefaultLocale": "en-US",
+                    "ManifestType": "version",
+                    "ManifestVersion": "1.10.0"
+                }),
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package",
+                    "PackageVersion": "1.2.3",
+                    "PackageLocale": "en-US",
+                    "PackageName": "Test Package",
+                    "Publisher": "Example",
+                    "License": "MIT",
+                    "ShortDescription": "Structured output",
+                    "ManifestType": "defaultLocale",
+                    "ManifestVersion": "1.10.0"
+                }),
+                serde_json::json!({
+                    "PackageIdentifier": "Test.Package",
+                    "PackageVersion": "1.2.3",
+                    "ManifestType": "installer",
+                    "ManifestVersion": "1.10.0",
+                    "Installers": [
+                        {
+                            "Architecture": "x64",
+                            "InstallerType": "msix",
+                            "InstallerUrl": "https://example.test/Test.Package.msix",
+                            "InstallerSha256": "ABC123",
+                            "Commands": ["testpkg"],
+                            "InstallerSwitches": { "Silent": "/quiet" },
+                            "Dependencies": {
+                                "PackageDependencies": [
+                                    { "PackageIdentifier": "Microsoft.VCRedist.2015+.x64" }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
         };
 
         let document = result.structured_document();
 
+        assert_eq!(document["ManifestType"].as_str(), Some("singleton"));
+        assert_eq!(document["ManifestVersion"].as_str(), Some("1.10.0"));
+        assert_eq!(document["PackageLocale"].as_str(), Some("en-US"));
         assert_eq!(
-            document["Package"]["PackageIdentifier"].as_str(),
-            Some("Test.Package")
-        );
-        assert_eq!(
-            document["Manifest"]["PackageVersion"].as_str(),
-            Some("1.2.3")
-        );
-        assert_eq!(
-            document["Manifest"]["Dependencies"]["PackageDependencies"][0]["PackageIdentifier"]
+            document["Installers"][0]["Dependencies"]["PackageDependencies"][0]["PackageIdentifier"]
                 .as_str(),
             Some("Microsoft.VCRedist.2015+.x64")
         );
         assert_eq!(
-            document["SelectedInstaller"]["Commands"][0].as_str(),
+            document["Installers"][0]["Commands"][0].as_str(),
             Some("testpkg")
         );
         assert_eq!(
-            document["SelectedInstaller"]["InstallerSwitches"]["Silent"].as_str(),
+            document["Installers"][0]["InstallerSwitches"]["Silent"].as_str(),
             Some("/quiet")
         );
-        assert_eq!(
-            document["CachedFiles"][0].as_str(),
-            Some(r"C:\temp\cache\Test.Package.yaml")
-        );
-        assert_eq!(document["Warnings"][0].as_str(), Some("cache warmed"));
+    }
+
+    #[test]
+    fn parse_yaml_manifest_bundle_returns_singleton_document() {
+        let yaml = r#"
+PackageIdentifier: Test.Package
+PackageVersion: 1.2.3
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.10.0
+---
+PackageIdentifier: Test.Package
+PackageVersion: 1.2.3
+PackageLocale: en-US
+PackageName: Test Package
+Publisher: Example
+License: MIT
+ShortDescription: Structured output
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0
+---
+PackageIdentifier: Test.Package
+PackageVersion: 1.2.3
+ManifestType: installer
+ManifestVersion: 1.10.0
+Installers:
+  - Architecture: x64
+    InstallerType: exe
+    InstallerUrl: https://example.test/Test.Package.exe
+    InstallerSha256: ABC123
+"#;
+
+        let (_manifest, documents) = parse_yaml_manifest_bundle(yaml.as_bytes()).expect("bundle");
+
+        assert_eq!(documents["ManifestType"].as_str(), Some("singleton"));
+        assert_eq!(documents["PackageIdentifier"].as_str(), Some("Test.Package"));
+        assert_eq!(documents["PackageName"].as_str(), Some("Test Package"));
     }
 
     #[test]

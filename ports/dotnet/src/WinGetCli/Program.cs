@@ -113,7 +113,7 @@ showCommand.SetHandler((ctx) =>
     else
     {
         var result = repo.Show(query);
-        if (output != OutputFormat.Text) WriteStructuredOutput(result.ToStructuredDocument(), output);
+        if (output != OutputFormat.Text) WriteManifestStructuredOutput(result.ToStructuredDocument(), output);
         else PrintShow(result);
     }
 });
@@ -743,6 +743,22 @@ void WriteStructuredOutput(object value, OutputFormat output)
         default:
             throw new InvalidOperationException("Text output should be handled separately.");
     }
+}
+
+void WriteManifestStructuredOutput(object value, OutputFormat output)
+{
+    if (output == OutputFormat.Yaml && value is List<Dictionary<string, object?>> documents)
+    {
+        var serializer = new SerializerBuilder().Build();
+        foreach (var document in documents)
+        {
+            Console.Write("---\n");
+            Console.Write(serializer.Serialize(document));
+        }
+        return;
+    }
+
+    WriteStructuredOutput(value, output);
 }
 
 static void PrintSearch(SearchResponse result)

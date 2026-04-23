@@ -126,7 +126,7 @@ internal static class RestSource
         return (results, results.Count >= maxResults);
     }
 
-    public static Manifest FetchManifest(HttpClient client, SourceRecord source,
+    public static (Manifest Manifest, object StructuredDocuments) FetchManifestWithDocuments(HttpClient client, SourceRecord source,
         RestInformation info, string packageId, string version, string channel)
     {
         var contract = ChooseContract(info.ServerSupportedVersions) ?? "1.0.0";
@@ -240,7 +240,7 @@ internal static class RestSource
             .ToList();
     }
 
-    private static Manifest ParseRestManifest(JsonElement json, string packageId, string version, string channel)
+    private static (Manifest Manifest, object StructuredDocuments) ParseRestManifest(JsonElement json, string packageId, string version, string channel)
     {
         var data = json.TryGetProperty("Data", out var d) ? d : json;
 
@@ -351,7 +351,7 @@ internal static class RestSource
             }
         }
 
-        return new Manifest
+        var manifest = new Manifest
         {
             Id = GetStr(data, "PackageIdentifier").Length > 0 ? GetStr(data, "PackageIdentifier") : packageId,
             Name = GetOptStr(defaultLocale, "PackageName") ?? GetStr(data, "PackageName"),
@@ -375,6 +375,97 @@ internal static class RestSource
             Agreements = agreements,
             Documentation = docs,
             Installers = installers,
+        };
+
+        return (manifest, BuildStructuredDocuments(data, installersSource, defaultLocale, packageId, version, channel));
+    }
+
+    private static object BuildStructuredDocuments(JsonElement data, JsonElement installerSource, JsonElement defaultLocale, string packageId, string version, string channel)
+    {
+        var packageIdentifier = GetString(data, "PackageIdentifier") ?? packageId;
+        var packageLocale = GetString(defaultLocale, "PackageLocale") ?? "en-US";
+        var manifestVersion = GetString(installerSource, "ManifestVersion")
+            ?? GetString(defaultLocale, "ManifestVersion")
+            ?? GetString(data, "ManifestVersion")
+            ?? "1.10.0";
+
+        var defaultLocaleDocument = CloneObject(defaultLocale);
+        defaultLocaleDocument["PackageIdentifier"] = packageIdentifier;
+        defaultLocaleDocument["PackageVersion"] = version;
+        defaultLocaleDocument["PackageLocale"] = packageLocale;
+        defaultLocaleDocument["ManifestType"] = "defaultLocale";
+        defaultLocaleDocument["ManifestVersion"] = manifestVersion;
+
+        var versionDocument = new Dictionary<string, object?>
+        {
+            ["PackageIdentifier"] = packageIdentifier,
+            ["PackageVersion"] = version,
+            ["DefaultLocale"] = packageLocale,
+            ["ManifestType"] = "version",
+            ["ManifestVersion"] = manifestVersion,
+        };
+
+        var installerDocument = CloneObject(installerSource);
+        installerDocument.Remove("DefaultLocale");
+        installerDocument.Remove("Locales");
+        installerDocument["PackageIdentifier"] = packageIdentifier;
+        installerDocument["PackageVersion"] = version;
+        if (!string.IsNullOrWhiteSpace(channel))
+            installerDocument["Channel"] = channel;
+        installerDocument["ManifestType"] = "installer";
+        installerDocument["ManifestVersion"] = manifestVersion;
+
+        var documents = new List<Dictionary<string, object?>>
+        {
+            versionDocument,
+            defaultLocaleDocument,
+            installerDocument,
+        };
+
+        if (installerSource.TryGetProperty("Locales", out var locales) && locales.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var locale in locales.EnumerateArray())
+            {
+                var localeDocument = CloneObject(locale);
+                localeDocument["PackageIdentifier"] = packageIdentifier;
+                localeDocument["PackageVersion"] = version;
+                localeDocument["ManifestType"] = "locale";
+                localeDocument["ManifestVersion"] = manifestVersion;
+                documents.Add(localeDocument);
+            }
+        }
+
+        return documents;
+    }
+
+    private static string? GetString(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static Dictionary<string, object?> CloneObject(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in element.EnumerateObject())
+            result[property.Name] = NormalizeJsonValue(property.Value);
+        return result;
+    }
+
+    private static object? NormalizeJsonValue(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.Object => CloneObject(element),
+            JsonValueKind.Array => element.EnumerateArray().Select(NormalizeJsonValue).ToList(),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.TryGetInt64(out var longValue) ? longValue : element.GetDouble(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => element.GetRawText(),
         };
     }
 

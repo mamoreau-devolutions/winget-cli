@@ -251,15 +251,9 @@ public record ShowResult
     public Installer? SelectedInstaller { get; init; }
     public List<string> CachedFiles { get; init; } = [];
     public List<string> Warnings { get; init; } = [];
+    public required object StructuredDocument { private get; init; }
 
-    public Dictionary<string, object?> ToStructuredDocument() => new()
-    {
-        ["Package"] = StructuredOutput.PackageDocument(Package, Manifest),
-        ["Manifest"] = StructuredOutput.ManifestDocument(Manifest),
-        ["SelectedInstaller"] = SelectedInstaller is null ? null : StructuredOutput.InstallerDocument(SelectedInstaller),
-        ["CachedFiles"] = CachedFiles,
-        ["Warnings"] = Warnings,
-    };
+    public object ToStructuredDocument() => StructuredOutput.CollapseManifestDocuments(StructuredDocument);
 }
 
 public record VersionsResult
@@ -338,20 +332,63 @@ internal record RestLocator(string PackageId, List<VersionKey> Versions) : Match
 
 file static class StructuredOutput
 {
-    public static Dictionary<string, object?> PackageDocument(SearchMatch package, Manifest manifest)
+    public static Dictionary<string, object?> CollapseManifestDocuments(object structuredDocument)
     {
-        var document = new Dictionary<string, object?>
+        return structuredDocument switch
         {
-            ["PackageIdentifier"] = package.Id,
-            ["PackageName"] = package.Name,
-            ["SourceName"] = package.SourceName,
-            ["SourceKind"] = package.SourceKind.ToString().ToLowerInvariant(),
-            ["PackageVersion"] = manifest.Version,
+            Dictionary<string, object?> document => CollapseManifestDocument(document),
+            List<Dictionary<string, object?>> documents => CollapseManifestDocuments(documents),
+            _ => throw new InvalidOperationException("Unexpected manifest document shape.")
         };
+    }
 
-        AddString(document, "Channel", manifest.Channel);
-        AddString(document, "MatchCriteria", package.MatchCriteria);
-        return document;
+    private static Dictionary<string, object?> CollapseManifestDocument(Dictionary<string, object?> document)
+    {
+        var manifestType = document.TryGetValue("ManifestType", out var value) ? value?.ToString() : null;
+        if (string.Equals(manifestType, "merged", StringComparison.OrdinalIgnoreCase))
+        {
+            var singleton = new Dictionary<string, object?>(document, StringComparer.OrdinalIgnoreCase);
+            singleton["ManifestType"] = "singleton";
+            return singleton;
+        }
+
+        return new Dictionary<string, object?>(document, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, object?> CollapseManifestDocuments(List<Dictionary<string, object?>> documents)
+    {
+        if (documents.Count == 0)
+            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        if (documents.Count == 1)
+            return CollapseManifestDocument(documents[0]);
+
+        var version = documents.FirstOrDefault(d => string.Equals(GetString(d, "ManifestType"), "version", StringComparison.OrdinalIgnoreCase));
+        var defaultLocale = documents.FirstOrDefault(d => string.Equals(GetString(d, "ManifestType"), "defaultLocale", StringComparison.OrdinalIgnoreCase));
+        var installer = documents.FirstOrDefault(d => string.Equals(GetString(d, "ManifestType"), "installer", StringComparison.OrdinalIgnoreCase));
+
+        var singleton = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        CopyKeys(singleton, version, "PackageIdentifier", "PackageVersion");
+        CopyAllExcept(singleton, defaultLocale, "ManifestType", "ManifestVersion");
+        CopyAllExcept(singleton, installer, "ManifestType", "ManifestVersion");
+
+        if (!singleton.ContainsKey("PackageLocale"))
+        {
+            var packageLocale = GetString(defaultLocale, "PackageLocale") ?? GetString(version, "DefaultLocale");
+            if (!string.IsNullOrWhiteSpace(packageLocale))
+                singleton["PackageLocale"] = packageLocale;
+        }
+
+        singleton["ManifestType"] = "singleton";
+        singleton["ManifestVersion"] =
+            GetString(installer, "ManifestVersion") ??
+            GetString(defaultLocale, "ManifestVersion") ??
+            GetString(version, "ManifestVersion") ??
+            "1.10.0";
+
+        singleton.Remove("DefaultLocale");
+        return singleton;
     }
 
     public static Dictionary<string, object?> ManifestDocument(Manifest manifest)
@@ -452,4 +489,32 @@ file static class StructuredOutput
         if (!string.IsNullOrWhiteSpace(value))
             document[key] = value;
     }
+
+    private static void CopyAllExcept(Dictionary<string, object?> target, Dictionary<string, object?>? source, params string[] excludedKeys)
+    {
+        if (source is null)
+            return;
+
+        var excluded = new HashSet<string>(excludedKeys, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in source)
+        {
+            if (!excluded.Contains(key))
+                target[key] = value;
+        }
+    }
+
+    private static void CopyKeys(Dictionary<string, object?> target, Dictionary<string, object?>? source, params string[] keys)
+    {
+        if (source is null)
+            return;
+
+        foreach (var key in keys)
+        {
+            if (source.TryGetValue(key, out var value))
+                target[key] = value;
+        }
+    }
+
+    private static string? GetString(Dictionary<string, object?>? source, string key) =>
+        source is not null && source.TryGetValue(key, out var value) ? value?.ToString() : null;
 }

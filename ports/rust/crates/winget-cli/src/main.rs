@@ -427,7 +427,7 @@ fn run() -> Result<()> {
                 if output.is_text() {
                     print_show(result);
                 } else {
-                    print_serialized(&result.structured_document(), output)?;
+                    print_manifest_serialized(&result.structured_document(), output)?;
                 }
             }
         }
@@ -685,6 +685,23 @@ fn print_serialized<T: serde::Serialize>(value: &T, output: OutputFormat) -> Res
         OutputFormat::Text => bail!("structured output requested without a serializer"),
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
         OutputFormat::Yaml => print!("{}", serde_yaml::to_string(value)?),
+    }
+    Ok(())
+}
+
+fn print_manifest_serialized(value: &serde_json::Value, output: OutputFormat) -> Result<()> {
+    match output {
+        OutputFormat::Text => bail!("structured output requested without a serializer"),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
+        OutputFormat::Yaml => {
+            if let serde_json::Value::Array(documents) = value {
+                for document in documents {
+                    print!("---\n{}", serde_yaml::to_string(document)?);
+                }
+            } else {
+                print!("{}", serde_yaml::to_string(value)?);
+            }
+        }
     }
     Ok(())
 }
