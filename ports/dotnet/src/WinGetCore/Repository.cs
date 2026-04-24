@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
@@ -12,6 +13,8 @@ public class Repository : IDisposable
     internal const string InstalledStateUnsupportedWarning = "Installed package discovery is not supported on this platform; returning no installed packages.";
     internal const string InstallUnsupportedWarning = "Installing packages is not supported on this platform; no changes were made.";
     internal const string UninstallUnsupportedWarning = "Uninstalling packages is not supported on this platform; no changes were made.";
+    internal const string RepairUnsupportedWarning = "Repairing packages is not supported on this platform; no changes were made.";
+    internal const string RepairReinstallWarning = "Pinget repair currently re-runs the package install flow for the selected package.";
 
     private readonly string _appRoot;
     private readonly HttpClient _client;
@@ -40,6 +43,17 @@ public class Repository : IDisposable
 
     public void Dispose() => _client.Dispose();
     public string AppRoot => _appRoot;
+    public static IReadOnlyList<string> SupportedAdminSettings => SettingsStoreManager.SupportedAdminSettings;
+
+    public void SetRequestHeader(string name, string value)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new InvalidOperationException("Header name is required.");
+
+        _client.DefaultRequestHeaders.Remove(name);
+        if (!_client.DefaultRequestHeaders.TryAddWithoutValidation(name, value))
+            throw new InvalidOperationException($"Invalid request header '{name}'.");
+    }
 
     // ── Source management ──
 
@@ -47,7 +61,7 @@ public class Repository : IDisposable
 
     public void AddSource(string name, string arg, SourceKind kind, string trustLevel = "None", bool explicitSource = false, int priority = 0)
     {
-        if (_store.Sources.Any(s => s.Name == name))
+        if (_store.Sources.Any(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException($"A source with name '{name}' already exists.");
         if (_store.Sources.Any(s => s.Arg == arg))
             throw new InvalidOperationException($"A source with argument '{arg}' already exists.");
@@ -58,10 +72,24 @@ public class Repository : IDisposable
             Kind = kind,
             Arg = arg,
             Identifier = name,
-            TrustLevel = trustLevel,
+            TrustLevel = NormalizeSourceTrustLevel(trustLevel),
             Explicit = explicitSource,
             Priority = priority,
         });
+        SourceStoreManager.Save(_store, _appRoot);
+    }
+
+    public void EditSource(string name, bool? explicitSource = null, string? trustLevel = null)
+    {
+        var source = _store.Sources.FirstOrDefault(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"Source '{name}' not found.");
+
+        if (explicitSource.HasValue)
+            source.Explicit = explicitSource.Value;
+
+        if (!string.IsNullOrWhiteSpace(trustLevel))
+            source.TrustLevel = NormalizeSourceTrustLevel(trustLevel);
+
         SourceStoreManager.Save(_store, _appRoot);
     }
 
@@ -114,6 +142,77 @@ public class Repository : IDisposable
         }
         _store = SourceStore.Default();
         SourceStoreManager.Save(_store, _appRoot);
+    }
+
+    public JsonObject GetUserSettings() =>
+        SettingsStoreManager.LoadJsonObject(SettingsStoreManager.UserSettingsPath(_appRoot));
+
+    public JsonObject SetUserSettings(JsonObject userSettings, bool merge)
+    {
+        var effective = merge
+            ? SettingsStoreManager.MergeJsonObjects(GetUserSettings(), userSettings)
+            : userSettings.DeepClone().AsObject();
+        SettingsStoreManager.SaveJsonObject(SettingsStoreManager.UserSettingsPath(_appRoot), effective);
+        return effective;
+    }
+
+    public bool TestUserSettings(JsonObject expected, bool ignoreNotSet)
+    {
+        var current = GetUserSettings();
+        return ignoreNotSet
+            ? SettingsStoreManager.JsonContains(current, expected)
+            : JsonNode.DeepEquals(current, expected);
+    }
+
+    public JsonObject GetAdminSettings()
+    {
+        var settings = SettingsStoreManager.LoadJsonObject(SettingsStoreManager.AdminSettingsPath(_appRoot));
+        foreach (var name in SupportedAdminSettings)
+        {
+            settings.TryAdd(name, false);
+        }
+
+        return settings;
+    }
+
+    public void SetAdminSetting(string name, bool enabled)
+    {
+        var normalized = SettingsStoreManager.NormalizeAdminSettingName(name);
+        var settings = GetAdminSettings();
+        settings[normalized] = enabled;
+        SettingsStoreManager.SaveJsonObject(SettingsStoreManager.AdminSettingsPath(_appRoot), settings);
+    }
+
+    public void ResetAdminSetting(string? name = null, bool resetAll = false)
+    {
+        if (!resetAll && string.IsNullOrWhiteSpace(name))
+            throw new InvalidOperationException("Resetting admin settings requires a setting name or reset-all.");
+
+        var settings = GetAdminSettings();
+        if (resetAll)
+        {
+            foreach (var settingName in SupportedAdminSettings)
+            {
+                settings[settingName] = false;
+            }
+        }
+        else
+        {
+            settings[SettingsStoreManager.NormalizeAdminSettingName(name!)] = false;
+        }
+
+        SettingsStoreManager.SaveJsonObject(SettingsStoreManager.AdminSettingsPath(_appRoot), settings);
+    }
+
+    public void EnsureSettingsFiles()
+    {
+        var userSettingsPath = SettingsStoreManager.UserSettingsPath(_appRoot);
+        if (!File.Exists(userSettingsPath))
+            SettingsStoreManager.SaveJsonObject(userSettingsPath, new JsonObject());
+
+        var adminSettingsPath = SettingsStoreManager.AdminSettingsPath(_appRoot);
+        if (!File.Exists(adminSettingsPath))
+            SettingsStoreManager.SaveJsonObject(adminSettingsPath, GetAdminSettings());
     }
 
     public List<SourceUpdateResult> UpdateSources(string? sourceName = null)
@@ -243,16 +342,22 @@ public class Repository : IDisposable
             .ThenBy(p => p.LocalId)
             .ToList();
 
+        var pins = query.UpgradeOnly ? ListPins() : [];
+        var listMatches = filtered
+            .Select(ListMatchFromInstalled)
+            .Where(match => !query.UpgradeOnly || query.IncludePinned || !IsUpgradeBlockedByPin(match, pins))
+            .ToList();
+
         bool truncated = false;
         if (query.Count is int limit)
         {
-            truncated = filtered.Count > limit;
-            filtered = filtered.Take(limit).ToList();
+            truncated = listMatches.Count > limit;
+            listMatches = listMatches.Take(limit).ToList();
         }
 
         return new ListResponse
         {
-            Matches = filtered.Select(ListMatchFromInstalled).ToList(),
+            Matches = listMatches,
             Warnings = warnings,
             Truncated = truncated,
         };
@@ -260,11 +365,11 @@ public class Repository : IDisposable
 
     // ── Pin management ──
 
-    public List<PinRecord> ListPins() => PinStore.List(_appRoot);
+    public List<PinRecord> ListPins(string? sourceId = null) => PinStore.List(_appRoot, sourceId);
     public void AddPin(string packageId, string version, string sourceId, PinType pinType)
         => PinStore.Add(packageId, version, sourceId, pinType, _appRoot);
-    public bool RemovePin(string packageId) => PinStore.Remove(packageId, _appRoot);
-    public void ResetPins() => PinStore.Reset(_appRoot);
+    public bool RemovePin(string packageId, string? sourceId = null) => PinStore.Remove(packageId, _appRoot, sourceId);
+    public void ResetPins(string? sourceId = null) => PinStore.Reset(_appRoot, sourceId);
 
     // ── Install / Uninstall ──
 
@@ -292,7 +397,8 @@ public class Repository : IDisposable
         if (installer.Sha256 is not null)
         {
             var actual = Sha256Hex(bytes);
-            if (!actual.Equals(installer.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!actual.Equals(installer.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                !request.IgnoreSecurityHash)
             {
                 File.Delete(dest);
                 throw new InvalidOperationException($"Installer hash mismatch. Expected: {installer.Sha256}, Got: {actual}");
@@ -323,6 +429,11 @@ public class Repository : IDisposable
                 .ToLowerInvariant();
             return CreateUnsupportedActionResult(manifest.Id, manifest.Version, unsupportedInstallerType, InstallUnsupportedWarning);
         }
+
+        var existingMatch = FindInstalledPackageForInstall(request, manifest);
+        var noOpResult = CreateInstallNoOpResult(request, manifest, existingMatch);
+        if (noOpResult is not null)
+            return noOpResult;
 
         EnsurePackageAgreementsAccepted(manifest, request);
         InstallDependencies(manifest, request);
@@ -385,6 +496,38 @@ public class Repository : IDisposable
         };
     }
 
+    public InstallResult Repair(RepairRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ManifestPath) && !OperatingSystem.IsWindows())
+        {
+            var packageId = request.Query.Id ??
+                request.Query.Name ??
+                request.Query.Moniker ??
+                request.Query.Query ??
+                request.ProductCode ??
+                "repair";
+            return CreateUnsupportedActionResult(packageId, request.Query.Version ?? "", "repair", RepairUnsupportedWarning);
+        }
+
+        var warnings = new List<string> { RepairReinstallWarning };
+        ListMatch? installedMatch = null;
+
+        if (string.IsNullOrWhiteSpace(request.ManifestPath))
+        {
+            var installed = List(CreateRepairListQuery(request));
+            warnings.AddRange(installed.Warnings);
+            if (installed.Matches.Count == 0)
+                throw new InvalidOperationException("No installed package matched the supplied repair query.");
+            if (installed.Matches.Count > 1)
+                throw new InvalidOperationException("Multiple installed packages matched the supplied repair query.");
+
+            installedMatch = installed.Matches[0];
+        }
+
+        var installResult = Install(CreateRepairInstallRequest(request, installedMatch));
+        return installResult with { Warnings = [.. warnings, .. installResult.Warnings] };
+    }
+
     public InstallResult Uninstall(PackageQuery query, bool silent)
     {
         return Uninstall(new UninstallRequest
@@ -435,6 +578,25 @@ public class Repository : IDisposable
         return manifest;
     }
 
+    private ListMatch? FindInstalledPackageForInstall(InstallRequest request, Manifest manifest)
+    {
+        var installedMatches = List(new ListQuery
+        {
+            Query = request.Query.Query,
+            Id = request.Query.Id ?? manifest.Id,
+            Name = request.Query.Name,
+            Moniker = request.Query.Moniker,
+            Source = request.Query.Source,
+            Exact = request.Query.Exact || !string.IsNullOrWhiteSpace(manifest.Id),
+            InstallScope = request.Query.InstallScope,
+            Count = 100,
+        }).Matches;
+
+        return installedMatches.FirstOrDefault(match =>
+            match.Id.Equals(manifest.Id, StringComparison.OrdinalIgnoreCase) ||
+            match.LocalId.Equals(manifest.Id, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static void EnsurePackageAgreementsAccepted(Manifest manifest, InstallRequest request)
     {
         if (!request.AcceptPackageAgreements && manifest.Agreements.Count > 0)
@@ -459,7 +621,7 @@ public class Repository : IDisposable
                 Query = new PackageQuery
                 {
                     Id = dependencyId,
-                    Source = request.Query.Source,
+                    Source = request.DependencySource ?? request.Query.Source,
                     Exact = true,
                 },
                 Mode = request.Mode,
@@ -467,9 +629,45 @@ public class Repository : IDisposable
                 DependenciesOnly = false,
                 AcceptPackageAgreements = request.AcceptPackageAgreements,
                 Force = request.Force,
+                IgnoreSecurityHash = request.IgnoreSecurityHash,
+                DependencySource = request.DependencySource,
             });
         }
     }
+
+    internal static ListQuery CreateRepairListQuery(RepairRequest request) => new()
+    {
+        Query = request.Query.Query,
+        Id = request.Query.Id,
+        Name = request.Query.Name,
+        Moniker = request.Query.Moniker,
+        ProductCode = request.ProductCode,
+        Version = request.Query.Version,
+        Source = request.Query.Source,
+        Exact = request.Query.Exact,
+        InstallScope = request.Query.InstallScope,
+        Count = 100,
+    };
+
+    internal static InstallRequest CreateRepairInstallRequest(RepairRequest request, ListMatch? installedMatch) => new()
+    {
+        Query = request.Query with
+        {
+            Query = installedMatch is null ? request.Query.Query : null,
+            Id = installedMatch?.Id ?? request.Query.Id,
+            Name = installedMatch is null ? request.Query.Name : null,
+            Moniker = installedMatch is null ? request.Query.Moniker : null,
+            Source = request.Query.Source ?? installedMatch?.SourceName,
+            Exact = true,
+            Version = request.Query.Version ?? installedMatch?.InstalledVersion,
+        },
+        ManifestPath = request.ManifestPath,
+        Mode = request.Mode,
+        LogPath = request.LogPath,
+        AcceptPackageAgreements = request.AcceptPackageAgreements,
+        Force = true,
+        IgnoreSecurityHash = request.IgnoreSecurityHash,
+    };
 
     internal static InstallResult CreateUnsupportedActionResult(string packageId, string version, string installerType, string warning)
     {
@@ -484,6 +682,46 @@ public class Repository : IDisposable
             NoOp = true,
             Warnings = [warning],
         };
+    }
+
+    internal static InstallResult? CreateInstallNoOpResult(InstallRequest request, Manifest manifest, ListMatch? existingMatch)
+    {
+        if (existingMatch is null)
+            return null;
+
+        if (request.NoUpgrade)
+        {
+            return new InstallResult
+            {
+                PackageId = manifest.Id,
+                Version = existingMatch.InstalledVersion,
+                InstallerPath = string.Empty,
+                InstallerType = "install",
+                ExitCode = 0,
+                Success = true,
+                NoOp = true,
+                Warnings = ["Package is already installed; skipping because --no-upgrade was specified."],
+            };
+        }
+
+        if (!request.Force &&
+            !string.IsNullOrWhiteSpace(existingMatch.InstalledVersion) &&
+            RestSource.CompareVersionStrings(existingMatch.InstalledVersion, manifest.Version) >= 0)
+        {
+            return new InstallResult
+            {
+                PackageId = manifest.Id,
+                Version = existingMatch.InstalledVersion,
+                InstallerPath = string.Empty,
+                InstallerType = "install",
+                ExitCode = 0,
+                Success = true,
+                NoOp = true,
+                Warnings = ["Package is already installed and up to date; rerun with --force to reinstall."],
+            };
+        }
+
+        return null;
     }
 
     private (string PackageId, string Version) DescribeUninstallTarget(UninstallRequest request)
@@ -860,10 +1098,14 @@ public class Repository : IDisposable
         var requestedArchitecture = query.InstallerArchitecture;
         var requestedType = query.InstallerType;
         var requestedScope = query.InstallScope;
+        var requestedPlatform = query.Platform;
+        var requestedOsVersion = query.OsVersion;
         var systemArchitecture = CurrentArchitecture();
+        var systemPlatform = CurrentPlatform();
+        var currentOsVersion = CurrentWindowsVersion();
 
         return installers
-            .Where(installer => InstallerMatchesRequested(installer, requestedType, requestedScope))
+            .Where(installer => InstallerMatchesRequested(installer, requestedType, requestedScope, requestedPlatform, requestedOsVersion, systemPlatform, currentOsVersion))
             .Where(installer => InstallerMatchesArchitecture(installer, requestedArchitecture, systemArchitecture))
             .Select((installer, index) => new
             {
@@ -934,6 +1176,19 @@ public class Repository : IDisposable
 
         string GetStr(string key) => dict.TryGetValue(key, out var v) ? v?.ToString() ?? "" : "";
         string? GetOptStr(string key) => dict.TryGetValue(key, out var v) && v is not null ? v.ToString() : null;
+        static List<string> ReadStringList(object? value)
+        {
+            if (value is null)
+                return [];
+
+            if (value is string single)
+                return string.IsNullOrWhiteSpace(single) ? [] : [single];
+
+            if (value is IList<object> list)
+                return list.Select(item => item?.ToString() ?? "").Where(item => !string.IsNullOrWhiteSpace(item)).ToList();
+
+            return [];
+        }
 
         var tags = new List<string>();
         if (dict.TryGetValue("Tags", out var tagsObj) && tagsObj is IList<object> tagList)
@@ -967,6 +1222,10 @@ public class Repository : IDisposable
         string? topReleaseDate = GetOptStr("ReleaseDate");
         string? topPackageFamilyName = GetOptStr("PackageFamilyName");
         string? topUpgradeCode = GetOptStr("UpgradeCode");
+        var topPlatforms = dict.TryGetValue("Platform", out var topPlatformValue)
+            ? ReadStringList(topPlatformValue)
+            : [];
+        string? topMinimumOsVersion = GetOptStr("MinimumOSVersion");
         var topSwitches = ReadInstallerSwitches(dict);
 
         var installers = new List<Installer>();
@@ -985,6 +1244,10 @@ public class Repository : IDisposable
 
                     var switches = ReadInstallerSwitches(instDict).MergeWith(topSwitches);
 
+                    var platforms = instDict.TryGetValue("Platform", out var platformValue)
+                        ? ReadStringList(platformValue)
+                        : [];
+
                     installers.Add(new Installer
                     {
                         Architecture = InstStr("Architecture"),
@@ -997,6 +1260,8 @@ public class Repository : IDisposable
                         ReleaseDate = InstStr("ReleaseDate") ?? topReleaseDate,
                         PackageFamilyName = InstStr("PackageFamilyName") ?? topPackageFamilyName,
                         UpgradeCode = InstStr("UpgradeCode") ?? topUpgradeCode,
+                        Platforms = platforms.Count > 0 ? platforms : [.. topPlatforms],
+                        MinimumOsVersion = InstStr("MinimumOSVersion") ?? topMinimumOsVersion,
                         Switches = switches,
                         Commands = InstArr("Commands"),
                         PackageDependencies = InstArr("PackageDependencies"),
@@ -1364,6 +1629,71 @@ public class Repository : IDisposable
         InstalledPackageHasUpgrade(pkg) ||
         (query.IncludeUnknown && InstalledPackageHasUnknownVersion(pkg) && pkg.Correlated is not null);
 
+    internal static PinRecord? FindApplicablePin(ListMatch match, IReadOnlyList<PinRecord> pins)
+    {
+        PinRecord? sourceSpecific = null;
+        PinRecord? sourceAgnostic = null;
+
+        foreach (var pin in pins)
+        {
+            if (!pin.PackageId.Equals(match.Id, StringComparison.OrdinalIgnoreCase) &&
+                !pin.PackageId.Equals(match.LocalId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(pin.SourceId))
+            {
+                if (!string.IsNullOrWhiteSpace(match.SourceName) &&
+                    pin.SourceId.Equals(match.SourceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    sourceSpecific = pin;
+                    break;
+                }
+            }
+            else if (sourceAgnostic is null)
+            {
+                sourceAgnostic = pin;
+            }
+        }
+
+        return sourceSpecific ?? sourceAgnostic;
+    }
+
+    internal static bool IsUpgradeBlockedByPin(ListMatch match, IReadOnlyList<PinRecord> pins)
+    {
+        if (string.IsNullOrWhiteSpace(match.AvailableVersion))
+            return false;
+
+        var pin = FindApplicablePin(match, pins);
+        if (pin is null)
+            return false;
+
+        return pin.PinType switch
+        {
+            PinType.Blocking => true,
+            PinType.Gating or PinType.Pinning => !VersionMatchesPinPattern(match.AvailableVersion!, pin.Version),
+            _ => false,
+        };
+    }
+
+    internal static bool VersionMatchesPinPattern(string version, string pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern) || pattern == "*")
+            return true;
+
+        if (!pattern.Contains('*'))
+            return version.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+
+        if (pattern.Count(c => c == '*') == 1 && pattern.EndsWith("*", StringComparison.Ordinal))
+        {
+            var prefix = pattern[..^1];
+            return version.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return version.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static int ListSortWeight(InstalledPackage pkg)
     {
         if (pkg.LocalId.StartsWith(@"ARP\", StringComparison.OrdinalIgnoreCase))
@@ -1418,9 +1748,48 @@ public class Repository : IDisposable
         pkg.Correlated?.Version is string availableVersion &&
         RestSource.CompareVersionStrings(availableVersion, pkg.InstalledVersion) > 0;
 
-    private static bool InstallerMatchesRequested(Installer installer, string? requestedType, string? requestedScope) =>
+    private static bool InstallerMatchesRequested(
+        Installer installer,
+        string? requestedType,
+        string? requestedScope,
+        string? requestedPlatform,
+        string? requestedOsVersion,
+        string? systemPlatform,
+        string? currentOsVersion) =>
         MatchesOptionalCaseInsensitive(installer.InstallerType, requestedType) &&
-        MatchesOptionalCaseInsensitive(installer.Scope, requestedScope);
+        MatchesOptionalCaseInsensitive(installer.Scope, requestedScope) &&
+        InstallerMatchesPlatform(installer, requestedPlatform, systemPlatform) &&
+        InstallerMatchesOsVersion(installer, requestedOsVersion, currentOsVersion);
+
+    private static bool InstallerMatchesPlatform(Installer installer, string? requestedPlatform, string? systemPlatform)
+    {
+        if (installer.Platforms.Count == 0)
+            return true;
+
+        var effectivePlatform = requestedPlatform ?? systemPlatform;
+        if (string.IsNullOrWhiteSpace(effectivePlatform))
+            return true;
+
+        return installer.Platforms.Any(platform => platform.Equals(effectivePlatform, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool InstallerMatchesOsVersion(Installer installer, string? requestedOsVersion, string? currentOsVersion)
+    {
+        if (string.IsNullOrWhiteSpace(installer.MinimumOsVersion))
+            return true;
+
+        var effectiveOsVersion = requestedOsVersion ?? currentOsVersion;
+        if (string.IsNullOrWhiteSpace(effectiveOsVersion))
+            return true;
+
+        if (TryParseVersion(installer.MinimumOsVersion!, out var minimumVersion) &&
+            TryParseVersion(effectiveOsVersion, out var actualVersion))
+        {
+            return actualVersion.CompareTo(minimumVersion) >= 0;
+        }
+
+        return installer.MinimumOsVersion.Equals(effectiveOsVersion, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool InstallerMatchesArchitecture(Installer installer, string? requestedArchitecture, string systemArchitecture)
     {
@@ -1498,6 +1867,15 @@ public class Repository : IDisposable
     private static bool MatchesOptionalCaseInsensitive(string? value, string? requested) =>
         requested is null || (value is not null && value.Equals(requested, StringComparison.OrdinalIgnoreCase));
 
+    private static bool TryParseVersion(string value, out System.Version version)
+    {
+        var parts = value.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        while (parts.Length > 4)
+            parts = parts.Take(parts.Length - 1).ToArray();
+
+        return System.Version.TryParse(string.Join('.', parts), out version!);
+    }
+
     private static string CurrentArchitecture() => RuntimeInformation.OSArchitecture switch
     {
         Architecture.X64 => "x64",
@@ -1505,6 +1883,12 @@ public class Repository : IDisposable
         Architecture.Arm64 => "arm64",
         _ => "neutral",
     };
+
+    private static string? CurrentPlatform() =>
+        OperatingSystem.IsWindows() ? "Windows.Desktop" : null;
+
+    private static string? CurrentWindowsVersion() =>
+        OperatingSystem.IsWindows() ? Environment.OSVersion.Version.ToString() : null;
 
     private static string[] PreferredArchitectures(string systemArchitecture) => systemArchitecture switch
     {
@@ -1647,4 +2031,15 @@ public class Repository : IDisposable
     {
         public int Compare(string? x, string? y) => RestSource.CompareVersionStrings(x ?? "", y ?? "");
     }
+
+    private static string NormalizeSourceTrustLevel(string? trustLevel) =>
+        string.IsNullOrWhiteSpace(trustLevel)
+            ? "None"
+            : trustLevel.Trim().ToLowerInvariant() switch
+            {
+                "none" => "None",
+                "default" => "None",
+                "trusted" => "Trusted",
+                _ => throw new InvalidOperationException($"Unsupported source trust level: {trustLevel}")
+            };
 }

@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Text.Json.Nodes;
 using Xunit;
 using Pinget.Core;
 
@@ -51,6 +54,90 @@ public class SourceStoreTests
 
             var store = SourceStoreManager.Load(appRoot);
             Assert.Contains(store.Sources, s => s.Name == "test");
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
+
+    [Fact]
+    public void EditSourceAndResetSource_PreserveCustomMetadata()
+    {
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            using var repo = Repository.Open(new RepositoryOptions { AppRoot = appRoot });
+            repo.AddSource("test", "https://example.com/test", SourceKind.Rest, trustLevel: "trusted", explicitSource: true, priority: 4);
+
+            repo.EditSource("test", explicitSource: false);
+            var edited = Assert.Single(repo.ListSources(), source => source.Name == "test");
+            Assert.Equal("Trusted", edited.TrustLevel);
+            Assert.False(edited.Explicit);
+            Assert.Equal(4, edited.Priority);
+
+            repo.ResetSource("test");
+            var reset = Assert.Single(repo.ListSources(), source => source.Name == "test");
+            Assert.Equal("Trusted", reset.TrustLevel);
+            Assert.False(reset.Explicit);
+            Assert.Equal(4, reset.Priority);
+            Assert.Null(reset.LastUpdate);
+            Assert.Null(reset.SourceVersion);
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
+
+    [Fact]
+    public void UserAndAdminSettings_RoundTripAndReset()
+    {
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            using var repo = Repository.Open(new RepositoryOptions { AppRoot = appRoot });
+
+            repo.SetUserSettings(new JsonObject
+            {
+                ["visual"] = new JsonObject
+                {
+                    ["progressBar"] = "retro"
+                }
+            }, merge: false);
+            repo.SetUserSettings(new JsonObject
+            {
+                ["experimentalFeatures"] = new JsonObject
+                {
+                    ["directMSI"] = true
+                }
+            }, merge: true);
+
+            var userSettings = repo.GetUserSettings();
+            Assert.Equal("retro", userSettings["visual"]?["progressBar"]?.GetValue<string>());
+            Assert.True(userSettings["experimentalFeatures"]?["directMSI"]?.GetValue<bool>());
+            Assert.True(repo.TestUserSettings(new JsonObject
+            {
+                ["experimentalFeatures"] = new JsonObject
+                {
+                    ["directMSI"] = true
+                }
+            }, ignoreNotSet: true));
+
+            repo.SetAdminSetting("LocalManifestFiles", true);
+            repo.SetAdminSetting("InstallerHashOverride", true);
+            var adminSettings = repo.GetAdminSettings();
+            Assert.True(adminSettings["LocalManifestFiles"]?.GetValue<bool>());
+            Assert.True(adminSettings["InstallerHashOverride"]?.GetValue<bool>());
+
+            repo.ResetAdminSetting("LocalManifestFiles");
+            Assert.False(repo.GetAdminSettings()["LocalManifestFiles"]?.GetValue<bool>());
+
+            repo.ResetAdminSetting(resetAll: true);
+            foreach (var setting in Repository.SupportedAdminSettings)
+            {
+                Assert.False(repo.GetAdminSettings()[setting]?.GetValue<bool>());
+            }
         }
         finally
         {
@@ -391,6 +478,38 @@ public class ModelsTests
         Assert.Equal("/VERYSILENT", installer.Switches.Silent);
         Assert.Equal("/HELP", installer.Switches.Interactive);
     }
+
+    [Fact]
+    public void ParseYamlManifest_PreservesPlatformAndMinimumOsVersion()
+    {
+        var yaml = """
+            PackageIdentifier: Test.Package
+            PackageVersion: 1.2.3
+            PackageName: Test Package
+            Platform:
+              - Windows.Desktop
+            MinimumOSVersion: 10.0.19041.0
+            Installers:
+              - Architecture: x64
+                InstallerType: exe
+                InstallerUrl: https://example.test/Test.Package.exe
+                InstallerSha256: ABC123
+              - Architecture: x64
+                InstallerType: msix
+                Platform:
+                  - Windows.Universal
+                MinimumOSVersion: 10.0.22621.0
+                InstallerUrl: https://example.test/Test.Package.msix
+                InstallerSha256: DEF456
+            """;
+
+        var manifest = Repository.ParseYamlManifest(System.Text.Encoding.UTF8.GetBytes(yaml));
+
+        Assert.Equal(["Windows.Desktop"], manifest.Installers[0].Platforms);
+        Assert.Equal("10.0.19041.0", manifest.Installers[0].MinimumOsVersion);
+        Assert.Equal(["Windows.Universal"], manifest.Installers[1].Platforms);
+        Assert.Equal("10.0.22621.0", manifest.Installers[1].MinimumOsVersion);
+    }
 }
 
 public class PinStoreTests
@@ -418,10 +537,286 @@ public class PinStoreTests
             TestPaths.DeleteAppRoot(appRoot);
         }
     }
+
+    [Fact]
+    public void RemoveAndReset_CanTargetSpecificSource()
+    {
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            PinStore.Add("Test.Package.Unit", "1.0.0", "winget", PinType.Pinning, appRoot);
+            PinStore.Add("Test.Package.Unit", "1.0.0", "msstore", PinType.Blocking, appRoot);
+
+            Assert.True(PinStore.Remove("Test.Package.Unit", appRoot, "winget"));
+            var remaining = PinStore.List(appRoot);
+            Assert.Single(remaining);
+            Assert.Equal("msstore", remaining[0].SourceId);
+
+            PinStore.Reset(appRoot, "msstore");
+            Assert.Empty(PinStore.List(appRoot));
+        }
+        finally
+        {
+            PinStore.Reset(appRoot);
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
 }
 
 public class RepositoryParityTests
 {
+    [Fact]
+    public void FindApplicablePin_PrefersSourceSpecificPin()
+    {
+        var match = new ListMatch
+        {
+            Name = "Test Package",
+            Id = "Test.Package",
+            LocalId = @"ARP\Machine\X64\Test.Package",
+            InstalledVersion = "1.0.0",
+            AvailableVersion = "2.0.0",
+            SourceName = "winget",
+        };
+
+        var pins = new List<PinRecord>
+        {
+            new() { PackageId = "Test.Package", Version = "1.*", SourceId = "", PinType = PinType.Pinning },
+            new() { PackageId = "Test.Package", Version = "1.0.0", SourceId = "winget", PinType = PinType.Blocking },
+        };
+
+        var selected = Repository.FindApplicablePin(match, pins);
+
+        Assert.NotNull(selected);
+        Assert.Equal(PinType.Blocking, selected!.PinType);
+        Assert.Equal("winget", selected.SourceId);
+    }
+
+    [Fact]
+    public void IsUpgradeBlockedByPin_RespectsBlockingAndVersionPatterns()
+    {
+        var match = new ListMatch
+        {
+            Name = "Test Package",
+            Id = "Test.Package",
+            LocalId = @"ARP\Machine\X64\Test.Package",
+            InstalledVersion = "1.0.0",
+            AvailableVersion = "2.0.0",
+            SourceName = "winget",
+        };
+
+        Assert.True(Repository.IsUpgradeBlockedByPin(match,
+        [
+            new PinRecord { PackageId = "Test.Package", Version = "*", SourceId = "winget", PinType = PinType.Blocking }
+        ]));
+
+        Assert.True(Repository.IsUpgradeBlockedByPin(match,
+        [
+            new PinRecord { PackageId = "Test.Package", Version = "1.5.*", SourceId = "winget", PinType = PinType.Pinning }
+        ]));
+
+        Assert.False(Repository.IsUpgradeBlockedByPin(match with { AvailableVersion = "1.5.9" },
+        [
+            new PinRecord { PackageId = "Test.Package", Version = "1.5.*", SourceId = "winget", PinType = PinType.Pinning }
+        ]));
+    }
+
+    [Fact]
+    public void CreateInstallNoOpResult_RespectsNoUpgrade()
+    {
+        var result = Repository.CreateInstallNoOpResult(
+            new InstallRequest
+            {
+                Query = new PackageQuery(),
+                NoUpgrade = true,
+            },
+            new Manifest
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                Version = "2.0.0",
+            },
+            new ListMatch
+            {
+                Name = "Test Package",
+                Id = "Test.Package",
+                LocalId = @"ARP\Machine\X64\Test.Package",
+                InstalledVersion = "1.0.0",
+            });
+
+        Assert.NotNull(result);
+        Assert.True(result!.NoOp);
+        Assert.Equal("1.0.0", result.Version);
+        Assert.Contains(result.Warnings, warning => warning.Contains("--no-upgrade", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CreateInstallNoOpResult_SkipsReinstallWhenAlreadyCurrent()
+    {
+        var result = Repository.CreateInstallNoOpResult(
+            new InstallRequest
+            {
+                Query = new PackageQuery(),
+            },
+            new Manifest
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                Version = "2.0.0",
+            },
+            new ListMatch
+            {
+                Name = "Test Package",
+                Id = "Test.Package",
+                LocalId = @"ARP\Machine\X64\Test.Package",
+                InstalledVersion = "2.0.0",
+            });
+
+        Assert.NotNull(result);
+        Assert.True(result!.NoOp);
+        Assert.Contains(result.Warnings, warning => warning.Contains("up to date", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CreateInstallNoOpResult_AllowsUpgradeWhenNewerVersionExists()
+    {
+        var result = Repository.CreateInstallNoOpResult(
+            new InstallRequest
+            {
+                Query = new PackageQuery(),
+            },
+            new Manifest
+            {
+                Id = "Test.Package",
+                Name = "Test Package",
+                Version = "2.0.0",
+            },
+            new ListMatch
+            {
+                Name = "Test Package",
+                Id = "Test.Package",
+                LocalId = @"ARP\Machine\X64\Test.Package",
+                InstalledVersion = "1.0.0",
+            });
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void DownloadInstaller_RejectsHashMismatchByDefault()
+    {
+        var payload = "pinget-test-payload"u8.ToArray();
+        using var server = new TestHttpServer(payload);
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            var manifestPath = TestPaths.WriteManifest(appRoot, $$"""
+                PackageIdentifier: Test.Package
+                PackageVersion: 1.0.0
+                PackageName: Test Package
+                ManifestType: merged
+                ManifestVersion: 1.10.0
+                Installers:
+                  - InstallerType: exe
+                    InstallerUrl: {{server.Url}}
+                    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+                """);
+
+            using var repo = Repository.Open(new RepositoryOptions { AppRoot = appRoot });
+            var request = new InstallRequest
+            {
+                Query = new PackageQuery(),
+                ManifestPath = manifestPath,
+            };
+
+            var ex = Assert.Throws<InvalidOperationException>(() => repo.DownloadInstaller(request, Path.Combine(appRoot, "downloads")));
+            Assert.Contains("Installer hash mismatch", ex.Message);
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
+
+    [Fact]
+    public void DownloadInstaller_IgnoresHashMismatchWhenRequested()
+    {
+        var payload = "pinget-test-payload"u8.ToArray();
+        using var server = new TestHttpServer(payload);
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            var manifestPath = TestPaths.WriteManifest(appRoot, $$"""
+                PackageIdentifier: Test.Package
+                PackageVersion: 1.0.0
+                PackageName: Test Package
+                ManifestType: merged
+                ManifestVersion: 1.10.0
+                Installers:
+                  - InstallerType: exe
+                    InstallerUrl: {{server.Url}}
+                    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+                """);
+
+            using var repo = Repository.Open(new RepositoryOptions { AppRoot = appRoot });
+            var request = new InstallRequest
+            {
+                Query = new PackageQuery(),
+                ManifestPath = manifestPath,
+                IgnoreSecurityHash = true,
+            };
+
+            var (_, installerPath) = repo.DownloadInstaller(request, Path.Combine(appRoot, "downloads"));
+            Assert.True(File.Exists(installerPath));
+            Assert.Equal(payload, File.ReadAllBytes(installerPath));
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
+
+    [Fact]
+    public void DownloadInstaller_SendsConfiguredRequestHeaders()
+    {
+        var payload = "pinget-test-payload"u8.ToArray();
+        string? authorizationHeader = null;
+        using var server = new TestHttpServer(payload, context =>
+        {
+            authorizationHeader = context.Request.Headers["Authorization"];
+        });
+        var appRoot = TestPaths.CreateTempAppRoot();
+        try
+        {
+            var manifestPath = TestPaths.WriteManifest(appRoot, $$"""
+                PackageIdentifier: Test.Package
+                PackageVersion: 1.0.0
+                PackageName: Test Package
+                ManifestType: merged
+                ManifestVersion: 1.10.0
+                Installers:
+                  - InstallerType: exe
+                    InstallerUrl: {{server.Url}}
+                """);
+
+            using var repo = Repository.Open(new RepositoryOptions { AppRoot = appRoot });
+            repo.SetRequestHeader("Authorization", "Bearer test-token");
+
+            var request = new InstallRequest
+            {
+                Query = new PackageQuery(),
+                ManifestPath = manifestPath,
+            };
+
+            var (_, installerPath) = repo.DownloadInstaller(request, Path.Combine(appRoot, "downloads"));
+            Assert.True(File.Exists(installerPath));
+            Assert.Equal("Bearer test-token", authorizationHeader);
+        }
+        finally
+        {
+            TestPaths.DeleteAppRoot(appRoot);
+        }
+    }
+
     [Fact]
     public void BuildArguments_UsesManifestSwitchesByMode()
     {
@@ -580,6 +975,122 @@ public class RepositoryParityTests
         Assert.NotNull(selected);
         Assert.Equal("en-GB", selected!.Locale);
     }
+
+    [Fact]
+    public void SelectInstaller_RespectsRequestedPlatform()
+    {
+        var installers = new List<Installer>
+        {
+            new() { Architecture = "x64", InstallerType = "exe", Platforms = ["Windows.Universal"], Switches = new InstallerSwitches() },
+            new() { Architecture = "x64", InstallerType = "exe", Platforms = ["Windows.Desktop"], Switches = new InstallerSwitches() },
+        };
+
+        var selected = Repository.SelectInstaller(installers, new PackageQuery
+        {
+            InstallerType = "exe",
+            Platform = "Windows.Desktop",
+        });
+
+        Assert.NotNull(selected);
+        Assert.Equal(["Windows.Desktop"], selected!.Platforms);
+    }
+
+    [Fact]
+    public void SelectInstaller_RespectsRequestedOsVersion()
+    {
+        var installers = new List<Installer>
+        {
+            new() { Architecture = "x64", InstallerType = "exe", MinimumOsVersion = "10.0.22621.0", Switches = new InstallerSwitches() },
+            new() { Architecture = "x64", InstallerType = "exe", MinimumOsVersion = "10.0.19041.0", Switches = new InstallerSwitches() },
+        };
+
+        var selected = Repository.SelectInstaller(installers, new PackageQuery
+        {
+            InstallerType = "exe",
+            OsVersion = "10.0.19045.0",
+        });
+
+        Assert.NotNull(selected);
+        Assert.Equal("10.0.19041.0", selected!.MinimumOsVersion);
+    }
+
+    [Fact]
+    public void CreateRepairListQuery_IncludesInstalledSelectors()
+    {
+        var request = new RepairRequest
+        {
+            Query = new PackageQuery
+            {
+                Query = "powertoys",
+                Id = "Microsoft.PowerToys",
+                Name = "PowerToys",
+                Moniker = "powertoys",
+                Source = "winget",
+                Version = "0.90.1",
+                InstallScope = "machine",
+                Exact = true,
+            },
+            ProductCode = "{1234-5678}",
+        };
+
+        var listQuery = Repository.CreateRepairListQuery(request);
+
+        Assert.Equal("powertoys", listQuery.Query);
+        Assert.Equal("Microsoft.PowerToys", listQuery.Id);
+        Assert.Equal("PowerToys", listQuery.Name);
+        Assert.Equal("powertoys", listQuery.Moniker);
+        Assert.Equal("{1234-5678}", listQuery.ProductCode);
+        Assert.Equal("0.90.1", listQuery.Version);
+        Assert.Equal("winget", listQuery.Source);
+        Assert.Equal("machine", listQuery.InstallScope);
+        Assert.True(listQuery.Exact);
+        Assert.Equal(100, listQuery.Count);
+    }
+
+    [Fact]
+    public void CreateRepairInstallRequest_ForcesReinstallOfResolvedInstalledPackage()
+    {
+        var request = new RepairRequest
+        {
+            Query = new PackageQuery
+            {
+                Name = "PowerToys",
+                Source = "winget",
+                Version = "0.90.1",
+                InstallerArchitecture = "x64",
+                Locale = "en-US",
+                InstallScope = "machine",
+            },
+            Mode = InstallerMode.Interactive,
+            LogPath = @"C:\temp\repair.log",
+            AcceptPackageAgreements = true,
+            IgnoreSecurityHash = true,
+        };
+        var installed = new ListMatch
+        {
+            Id = "Microsoft.PowerToys",
+            LocalId = @"ARP\Machine\X64\PowerToys",
+            Name = "PowerToys",
+            InstalledVersion = "0.90.1",
+            SourceName = "winget",
+            ProductCodes = [],
+        };
+
+        var installRequest = Repository.CreateRepairInstallRequest(request, installed);
+
+        Assert.Equal("Microsoft.PowerToys", installRequest.Query.Id);
+        Assert.Equal("winget", installRequest.Query.Source);
+        Assert.Equal("0.90.1", installRequest.Query.Version);
+        Assert.Equal("x64", installRequest.Query.InstallerArchitecture);
+        Assert.Equal("en-US", installRequest.Query.Locale);
+        Assert.Equal("machine", installRequest.Query.InstallScope);
+        Assert.True(installRequest.Query.Exact);
+        Assert.True(installRequest.Force);
+        Assert.True(installRequest.AcceptPackageAgreements);
+        Assert.True(installRequest.IgnoreSecurityHash);
+        Assert.Equal(InstallerMode.Interactive, installRequest.Mode);
+        Assert.Equal(@"C:\temp\repair.log", installRequest.LogPath);
+    }
 }
 
 file static class TestPaths
@@ -587,9 +1098,88 @@ file static class TestPaths
     public static string CreateTempAppRoot() =>
         Path.Combine(Path.GetTempPath(), "pinget-dotnet-tests", Guid.NewGuid().ToString("N"));
 
+    public static string WriteManifest(string appRoot, string yaml)
+    {
+        Directory.CreateDirectory(appRoot);
+        var manifestPath = Path.Combine(appRoot, "manifest.yaml");
+        File.WriteAllText(manifestPath, yaml);
+        return manifestPath;
+    }
+
     public static void DeleteAppRoot(string appRoot)
     {
         if (Directory.Exists(appRoot))
             Directory.Delete(appRoot, recursive: true);
+    }
+}
+
+file sealed class TestHttpServer : IDisposable
+{
+    private readonly HttpListener _listener;
+    private readonly Task _loopTask;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Action<HttpListenerContext>? _onRequest;
+
+    public TestHttpServer(byte[] payload, Action<HttpListenerContext>? onRequest = null)
+    {
+        _onRequest = onRequest;
+        var port = GetFreePort();
+        var prefix = $"http://127.0.0.1:{port}/";
+        Url = $"{prefix}installer.bin";
+        _listener = new HttpListener();
+        _listener.Prefixes.Add(prefix);
+        _listener.Start();
+        _loopTask = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext? context = null;
+                try
+                {
+                    context = await _listener.GetContextAsync();
+                    _onRequest?.Invoke(context);
+                    context.Response.StatusCode = 200;
+                    context.Response.ContentType = "application/octet-stream";
+                    context.Response.ContentLength64 = payload.Length;
+                    await context.Response.OutputStream.WriteAsync(payload, _cts.Token);
+                }
+                catch (ObjectDisposedException) when (_cts.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (HttpListenerException) when (_cts.IsCancellationRequested)
+                {
+                    break;
+                }
+                finally
+                {
+                    context?.Response.OutputStream.Dispose();
+                    context?.Response.Close();
+                }
+            }
+        }, _cts.Token);
+    }
+
+    public string Url { get; }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _listener.Stop();
+        _listener.Close();
+        try
+        {
+            _loopTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private static int GetFreePort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 }

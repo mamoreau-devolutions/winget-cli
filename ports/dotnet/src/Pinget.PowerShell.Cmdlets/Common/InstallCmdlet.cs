@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Management.Automation;
 using Pinget.PowerShell.Engine.PSObjects;
 
@@ -41,5 +42,5 @@ public abstract class InstallCmdlet : InstallerSelectionCmdlet
     public SwitchParameter Force { get; set; }
 
     [Parameter(ValueFromPipelineByPropertyName = true)]
-    public string? Header { get; set; }
+    public Hashtable? Header { get; set; }
 }

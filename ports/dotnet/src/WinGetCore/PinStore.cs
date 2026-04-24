@@ -4,7 +4,7 @@ namespace Pinget.Core;
 
 internal static class PinStore
 {
-    public static List<PinRecord> List(string? appRoot = null)
+    public static List<PinRecord> List(string? appRoot = null, string? sourceId = null)
     {
         var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         if (!File.Exists(dbPath)) return [];
@@ -13,7 +13,15 @@ internal static class PinStore
         conn.Open();
 
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT package_id, version, source_id, pin_type FROM pin";
+        if (string.IsNullOrWhiteSpace(sourceId))
+        {
+            cmd.CommandText = "SELECT package_id, version, source_id, pin_type FROM pin";
+        }
+        else
+        {
+            cmd.CommandText = "SELECT package_id, version, source_id, pin_type FROM pin WHERE source_id = @src";
+            cmd.Parameters.AddWithValue("@src", sourceId);
+        }
 
         var pins = new List<PinRecord>();
         using var reader = cmd.ExecuteReader();
@@ -69,7 +77,7 @@ internal static class PinStore
         cmd.ExecuteNonQuery();
     }
 
-    public static bool Remove(string packageId, string? appRoot = null)
+    public static bool Remove(string packageId, string? appRoot = null, string? sourceId = null)
     {
         var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         if (!File.Exists(dbPath)) return false;
@@ -78,16 +86,39 @@ internal static class PinStore
         conn.Open();
 
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM pin WHERE package_id = @id";
+        if (string.IsNullOrWhiteSpace(sourceId))
+        {
+            cmd.CommandText = "DELETE FROM pin WHERE package_id = @id";
+        }
+        else
+        {
+            cmd.CommandText = "DELETE FROM pin WHERE package_id = @id AND source_id = @src";
+            cmd.Parameters.AddWithValue("@src", sourceId);
+        }
         cmd.Parameters.AddWithValue("@id", packageId);
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    public static void Reset(string? appRoot = null)
+    public static void Reset(string? appRoot = null, string? sourceId = null)
     {
         var dbPath = SourceStoreManager.PinsDbPath(appRoot);
         SqliteConnection.ClearAllPools();
         if (File.Exists(dbPath))
-            File.Delete(dbPath);
+        {
+            if (string.IsNullOrWhiteSpace(sourceId))
+            {
+                File.Delete(dbPath);
+            }
+            else
+            {
+                using var conn = new SqliteConnection($"Data Source={dbPath}");
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM pin WHERE source_id = @src";
+                cmd.Parameters.AddWithValue("@src", sourceId);
+                cmd.ExecuteNonQuery();
+            }
+        }
     }
 }

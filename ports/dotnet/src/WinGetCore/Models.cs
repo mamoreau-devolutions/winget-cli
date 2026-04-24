@@ -55,6 +55,8 @@ public record PackageQuery
     public string? InstallerType { get; init; }
     public string? InstallerArchitecture { get; init; }
     public string? InstallScope { get; init; }
+    public string? Platform { get; init; }
+    public string? OsVersion { get; init; }
 }
 
 public record ListQuery
@@ -150,6 +152,8 @@ public record Installer
     public string? ReleaseDate { get; init; }
     public string? PackageFamilyName { get; init; }
     public string? UpgradeCode { get; init; }
+    public List<string> Platforms { get; init; } = [];
+    public string? MinimumOsVersion { get; init; }
     public InstallerSwitches Switches { get; init; } = new();
     public List<string> Commands { get; init; } = [];
     public List<string> PackageDependencies { get; init; } = [];
@@ -232,6 +236,21 @@ public record InstallRequest
     public bool Force { get; init; }
     public string? Rename { get; init; }
     public bool UninstallPrevious { get; init; }
+    public bool IgnoreSecurityHash { get; init; }
+    public string? DependencySource { get; init; }
+    public bool NoUpgrade { get; init; }
+}
+
+public record RepairRequest
+{
+    public required PackageQuery Query { get; init; }
+    public string? ManifestPath { get; init; }
+    public string? ProductCode { get; init; }
+    public InstallerMode Mode { get; init; } = InstallerMode.SilentWithProgress;
+    public string? LogPath { get; init; }
+    public bool AcceptPackageAgreements { get; init; }
+    public bool Force { get; init; }
+    public bool IgnoreSecurityHash { get; init; }
 }
 
 public record UninstallRequest
@@ -463,6 +482,9 @@ internal static class StructuredOutput
         AddString(document, "ReleaseDate", installer.ReleaseDate);
         AddString(document, "PackageFamilyName", installer.PackageFamilyName);
         AddString(document, "UpgradeCode", installer.UpgradeCode);
+        if (installer.Platforms.Count > 0)
+            document["Platform"] = installer.Platforms;
+        AddString(document, "MinimumOSVersion", installer.MinimumOsVersion);
         if (installer.Commands.Count > 0)
             document["Commands"] = installer.Commands;
         if (installer.PackageDependencies.Count > 0)

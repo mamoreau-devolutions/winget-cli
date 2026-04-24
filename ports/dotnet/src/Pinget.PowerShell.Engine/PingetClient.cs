@@ -1,5 +1,6 @@
 using Pinget.Core;
 using Pinget.PowerShell.Engine.PSObjects;
+using System.Collections;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -7,15 +8,6 @@ namespace Pinget.PowerShell.Engine;
 
 public sealed class PingetClient : IDisposable
 {
-    private static readonly string[] SupportedAdminSettings =
-    [
-        "LocalManifestFiles",
-        "BypassCertificatePinningForMicrosoftStore",
-        "InstallerHashOverride",
-        "LocalArchiveMalwareScanOverride",
-        "ProxyCommandLineOptions",
-    ];
-
     private readonly Repository _repository;
 
     private PingetClient(Repository repository)
@@ -160,7 +152,7 @@ public sealed class PingetClient : IDisposable
         string? targetOsVersion)
     {
         var warnings = new List<string>();
-        AddIgnoredDownloadWarnings(warnings, allowHashMismatch, skipDependencies, skipMicrosoftStoreLicense, platform, targetOsVersion);
+        AddDownloadCompatibilityWarnings(warnings, skipDependencies, skipMicrosoftStoreLicense);
 
         var request = new InstallRequest
         {
@@ -180,8 +172,11 @@ public sealed class PingetClient : IDisposable
                 InstallerArchitecture = architecture == PSProcessorArchitecture.Default ? null : architecture.ToString(),
                 InstallerType = installerType == PSPackageInstallerType.Default ? null : installerType.ToString(),
                 InstallScope = scope == PSPackageInstallScope.Any ? null : scope.ToString(),
+                Platform = ToInstallerPlatform(platform),
+                OsVersion = Normalize(targetOsVersion),
             },
             SkipDependencies = skipDependencies,
+            IgnoreSecurityHash = allowHashMismatch,
         };
 
         var outputDirectory = string.IsNullOrWhiteSpace(downloadDirectory)
@@ -204,41 +199,15 @@ public sealed class PingetClient : IDisposable
             warnings);
     }
 
-    public JsonObject GetUserSettings() => LoadJsonObject(GetUserSettingsPath());
+    public JsonObject GetUserSettings() => _repository.GetUserSettings();
 
-    public JsonObject SetUserSettings(JsonObject userSettings, bool merge)
-    {
-        var effective = merge ? MergeJsonObjects(GetUserSettings(), userSettings) : userSettings.DeepClone().AsObject();
-        SaveJsonObject(GetUserSettingsPath(), effective);
-        return effective;
-    }
+    public JsonObject SetUserSettings(JsonObject userSettings, bool merge) => _repository.SetUserSettings(userSettings, merge);
 
-    public bool TestUserSettings(JsonObject expected, bool ignoreNotSet)
-    {
-        var current = GetUserSettings();
-        return ignoreNotSet ? JsonContains(current, expected) : JsonNode.DeepEquals(current, expected);
-    }
+    public bool TestUserSettings(JsonObject expected, bool ignoreNotSet) => _repository.TestUserSettings(expected, ignoreNotSet);
 
-    public JsonObject GetAdminSettings()
-    {
-        var settings = LoadJsonObject(GetAdminSettingsPath());
-        foreach (var name in SupportedAdminSettings)
-        {
-            settings.TryAdd(name, false);
-        }
+    public JsonObject GetAdminSettings() => _repository.GetAdminSettings();
 
-        return settings;
-    }
-
-    public void SetAdminSetting(string name, bool enabled)
-    {
-        if (!SupportedAdminSettings.Contains(name, StringComparer.Ordinal))
-            throw new InvalidOperationException($"Unsupported admin setting: {name}");
-
-        var settings = GetAdminSettings();
-        settings[name] = enabled;
-        SaveJsonObject(GetAdminSettingsPath(), settings);
-    }
+    public void SetAdminSetting(string name, bool enabled) => _repository.SetAdminSetting(name, enabled);
 
     public void AssertPackageManager(string? version, bool latest, bool includePrerelease)
     {
@@ -292,12 +261,7 @@ public sealed class PingetClient : IDisposable
         var sourcesPath = Path.Combine(_repository.AppRoot, "sources.json");
         if (!File.Exists(sourcesPath))
             _repository.ResetSources();
-
-        if (!File.Exists(GetUserSettingsPath()))
-            SaveJsonObject(GetUserSettingsPath(), new JsonObject());
-
-        if (!File.Exists(GetAdminSettingsPath()))
-            SaveJsonObject(GetAdminSettingsPath(), GetAdminSettings());
+        _repository.EnsureSettingsFiles();
 
         AssertPackageManager(null, false, false);
         return new CommandResult<int>(0, warnings);
@@ -317,7 +281,7 @@ public sealed class PingetClient : IDisposable
         string? location,
         string? log,
         bool force,
-        string? header,
+        IDictionary? header,
         bool skipDependencies,
         string? locale,
         PSPackageInstallScope scope,
@@ -326,7 +290,7 @@ public sealed class PingetClient : IDisposable
         PSPackageInstallerType installerType)
     {
         var warnings = new List<string>();
-        AddUnsupportedActionWarnings(warnings, allowHashMismatch, header);
+        ApplyRequestHeaders(header);
 
         var request = new InstallRequest
         {
@@ -353,6 +317,7 @@ public sealed class PingetClient : IDisposable
             LogPath = Normalize(log),
             Force = force,
             SkipDependencies = skipDependencies,
+            IgnoreSecurityHash = allowHashMismatch,
             Mode = ToInstallerMode(mode),
         };
 
@@ -410,7 +375,7 @@ public sealed class PingetClient : IDisposable
         string? location,
         string? log,
         bool force,
-        string? header,
+        IDictionary? header,
         bool skipDependencies,
         string? locale,
         PSPackageInstallScope scope,
@@ -420,7 +385,7 @@ public sealed class PingetClient : IDisposable
         bool includeUnknown)
     {
         var warnings = new List<string>();
-        AddUnsupportedActionWarnings(warnings, allowHashMismatch, header);
+        ApplyRequestHeaders(header);
 
         var listQuery = new ListQuery
         {
@@ -460,6 +425,7 @@ public sealed class PingetClient : IDisposable
                 LogPath = Normalize(log),
                 Force = force,
                 SkipDependencies = skipDependencies,
+                IgnoreSecurityHash = allowHashMismatch,
                 Mode = ToInstallerMode(mode),
             };
 
@@ -493,55 +459,36 @@ public sealed class PingetClient : IDisposable
         PSPackageRepairMode mode)
     {
         var warnings = new List<string>();
-        if (allowHashMismatch)
-            warnings.Add("AllowHashMismatch is accepted for compatibility but is not implemented by Pinget repair.");
-
-        warnings.Add("Pinget repair currently re-runs the package install flow for the selected installed package.");
-
-        var listQuery = new ListQuery
-        {
-            Id = Normalize(id ?? inputObject?.Id),
-            Name = Normalize(name ?? inputObject?.Name),
-            Moniker = Normalize(moniker ?? inputObject?.Moniker),
-            Source = Normalize(source ?? inputObject?.Source),
-            Query = JoinQuery(query),
-            Version = Normalize(version) ?? GetCatalogVersion(inputObject),
-            Exact = true,
-        };
-
-        var installed = _repository.List(listQuery);
-        warnings.AddRange(installed.Warnings);
-        if (installed.Matches.Count == 0)
-            throw new InvalidOperationException("No installed package matched the supplied repair query.");
-        if (installed.Matches.Count > 1)
-            throw new InvalidOperationException("Multiple installed packages matched the supplied repair query.");
-
-        var match = installed.Matches[0];
-        var request = new InstallRequest
+        var request = new RepairRequest
         {
             Query = new PackageQuery
             {
-                Id = match.Id,
-                Source = match.SourceName,
+                Id = Normalize(id ?? inputObject?.Id),
+                Name = Normalize(name ?? inputObject?.Name),
+                Moniker = Normalize(moniker ?? inputObject?.Moniker),
+                Source = Normalize(source ?? inputObject?.Source),
+                Query = JoinQuery(query),
+                Version = Normalize(version) ?? GetCatalogVersion(inputObject),
                 Exact = true,
-                Version = Normalize(version) ?? match.InstalledVersion,
             },
+            IgnoreSecurityHash = allowHashMismatch,
             Force = force,
             LogPath = Normalize(log),
             Mode = ToInstallerMode(mode),
         };
 
-        var result = _repository.Install(request);
+        var result = _repository.Repair(request);
+        var repairedVersion = Normalize(version) ?? GetCatalogVersion(inputObject) ?? result.Version;
         warnings.AddRange(result.Warnings);
         return new CommandResult<PSRepairResult>(ToPsRepairResult(result, request, new PSInstalledCatalogPackage(
-            match.Id,
-            match.Name,
-            match.SourceName ?? string.Empty,
+            result.PackageId,
+            inputObject?.Name ?? result.PackageId,
+            Normalize(source ?? inputObject?.Source) ?? string.Empty,
             null,
-            match.InstalledVersion,
-            string.IsNullOrWhiteSpace(match.AvailableVersion) ? [] : [match.AvailableVersion],
-            match.Publisher,
-            match.Scope)), warnings);
+            repairedVersion,
+            [],
+            null,
+            (inputObject as PSInstalledCatalogPackage)?.Scope)), warnings);
     }
 
     private static PackageQuery BuildPackageQuery(
@@ -594,33 +541,43 @@ public sealed class PingetClient : IDisposable
         };
     }
 
-    private static void AddIgnoredDownloadWarnings(
+    private static void AddDownloadCompatibilityWarnings(
         List<string> warnings,
-        bool allowHashMismatch,
         bool skipDependencies,
-        bool skipMicrosoftStoreLicense,
-        PSWindowsPlatform platform,
-        string? targetOsVersion)
+        bool skipMicrosoftStoreLicense)
     {
-        if (allowHashMismatch)
-            warnings.Add("AllowHashMismatch is not implemented by Pinget export and was ignored.");
         if (skipDependencies)
             warnings.Add("SkipDependencies does not affect Pinget export and was ignored.");
-        if (skipMicrosoftStoreLicense)
-            warnings.Add("SkipMicrosoftStoreLicense is not implemented by Pinget export and was ignored.");
-        if (platform != PSWindowsPlatform.Default)
-            warnings.Add("Platform-specific export selection is not implemented by Pinget export and was ignored.");
-        if (!string.IsNullOrWhiteSpace(targetOsVersion))
-            warnings.Add("TargetOSVersion is not implemented by Pinget export and was ignored.");
     }
 
-    private static void AddUnsupportedActionWarnings(List<string> warnings, bool allowHashMismatch, string? header)
+    private void ApplyRequestHeaders(IDictionary? headers)
     {
-        if (allowHashMismatch)
-            warnings.Add("AllowHashMismatch is accepted for compatibility but is not implemented by Pinget actions.");
-        if (!string.IsNullOrWhiteSpace(header))
-            warnings.Add("Header is accepted for compatibility but is not implemented by Pinget actions.");
+        if (headers is null)
+            return;
+
+        foreach (DictionaryEntry entry in headers)
+        {
+            if (entry.Key is null)
+                continue;
+
+            var name = Normalize(entry.Key.ToString())
+                ?? throw new InvalidOperationException("Header name is required.");
+            var value = Normalize(entry.Value?.ToString())
+                ?? throw new InvalidOperationException($"Header '{name}' requires a value.");
+            _repository.SetRequestHeader(name, value);
+        }
     }
+
+    private static string? ToInstallerPlatform(PSWindowsPlatform platform) => platform switch
+    {
+        PSWindowsPlatform.Default => null,
+        PSWindowsPlatform.Universal => "Windows.Universal",
+        PSWindowsPlatform.Desktop => "Windows.Desktop",
+        PSWindowsPlatform.IoT => "Windows.IoT",
+        PSWindowsPlatform.Team => "Windows.Team",
+        PSWindowsPlatform.Holographic => "Windows.Holographic",
+        _ => null,
+    };
 
     private static string? GetCatalogVersion(PSCatalogPackage? inputObject) => inputObject switch
     {
@@ -681,7 +638,7 @@ public sealed class PingetClient : IDisposable
         };
     }
 
-    private static PSRepairResult ToPsRepairResult(InstallResult result, InstallRequest request, PSCatalogPackage? inputObject)
+    private static PSRepairResult ToPsRepairResult(InstallResult result, RepairRequest request, PSCatalogPackage? inputObject)
     {
         var identity = ResolveIdentity(result.PackageId, request.Query.Name ?? inputObject?.Name, request.Query.Source ?? inputObject?.Source);
         return new PSRepairResult
@@ -698,87 +655,6 @@ public sealed class PingetClient : IDisposable
 
     private static (string Name, string? Source) ResolveIdentity(string id, string? name, string? source) =>
         (string.IsNullOrWhiteSpace(name) ? id : name, Normalize(source));
-
-    private string GetUserSettingsPath() => Path.Combine(_repository.AppRoot, "user-settings.json");
-
-    private string GetAdminSettingsPath() => Path.Combine(_repository.AppRoot, "admin-settings.json");
-
-    private static JsonObject LoadJsonObject(string path)
-    {
-        if (!File.Exists(path))
-            return new JsonObject();
-
-        var node = JsonNode.Parse(File.ReadAllText(path));
-        return node as JsonObject ?? new JsonObject();
-    }
-
-    private static void SaveJsonObject(string path, JsonObject value)
-    {
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrWhiteSpace(directory))
-            Directory.CreateDirectory(directory);
-
-        File.WriteAllText(path, value.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-    }
-
-    private static JsonObject MergeJsonObjects(JsonObject current, JsonObject update)
-    {
-        var merged = current.DeepClone().AsObject();
-        foreach (var entry in update)
-        {
-            if (entry.Value is JsonObject updateObject &&
-                merged[entry.Key] is JsonObject currentObject)
-            {
-                merged[entry.Key] = MergeJsonObjects(currentObject, updateObject);
-            }
-            else
-            {
-                merged[entry.Key] = entry.Value?.DeepClone();
-            }
-        }
-
-        return merged;
-    }
-
-    private static bool JsonContains(JsonNode current, JsonNode expected)
-    {
-        if (expected is JsonObject expectedObject)
-        {
-            var currentObject = current as JsonObject;
-            if (currentObject is null)
-                return false;
-
-            foreach (var entry in expectedObject)
-            {
-                if (!currentObject.TryGetPropertyValue(entry.Key, out var currentChild) ||
-                    currentChild is null ||
-                    entry.Value is null ||
-                    !JsonContains(currentChild, entry.Value))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        if (expected is JsonArray expectedArray)
-        {
-            var currentArray = current as JsonArray;
-            if (currentArray is null || currentArray.Count != expectedArray.Count)
-                return false;
-
-            for (var i = 0; i < expectedArray.Count; i++)
-            {
-                if (currentArray[i] is null || expectedArray[i] is null || !JsonContains(currentArray[i]!, expectedArray[i]!))
-                    return false;
-            }
-
-            return true;
-        }
-
-        return JsonNode.DeepEquals(current, expected);
-    }
 
     private static bool UsesExactMatch(PSPackageFieldMatchOption matchOption) =>
         matchOption is PSPackageFieldMatchOption.Equals or PSPackageFieldMatchOption.EqualsCaseInsensitive;

@@ -93,6 +93,18 @@ Describe 'Pinget command metadata' {
         $command.Parameters.Keys | Should -Contain 'Priority'
     }
 
+    It 'keeps export installer selection parameters' {
+        $command = Get-Command Export-PingetPackage -Module Pinget
+        $command.Parameters.Keys | Should -Contain 'AllowHashMismatch'
+        $command.Parameters.Keys | Should -Contain 'Platform'
+        $command.Parameters.Keys | Should -Contain 'TargetOSVersion'
+    }
+
+    It 'keeps install compatibility headers as a hashtable' {
+        $command = Get-Command Install-PingetPackage -Module Pinget
+        $command.Parameters['Header'].ParameterType.FullName | Should -Be 'System.Collections.Hashtable'
+    }
+
     It 'keeps Reset-PingetSource parameter sets' {
         $command = Get-Command Reset-PingetSource -Module Pinget
 
@@ -165,12 +177,22 @@ Describe 'Pinget format data and result objects' {
     }
 
     It 'returns download results with common operation members' {
-        $result = Export-PingetPackage -Id 'WinMerge.WinMerge' -Source $script:sourceName -DownloadDirectory $script:downloadDirectory
+        $warnings = @()
+        $result = Export-PingetPackage `
+            -Id 'WinMerge.WinMerge' `
+            -Source $script:sourceName `
+            -DownloadDirectory $script:downloadDirectory `
+            -AllowHashMismatch `
+            -SkipMicrosoftStoreLicense `
+            -Platform Desktop `
+            -TargetOSVersion ([System.Environment]::OSVersion.Version.ToString()) `
+            -WarningVariable warnings
 
         $result.Status | Should -Be 'Ok'
         $result.CorrelationData | Should -Not -BeNullOrEmpty
         $result.ExtendedErrorCode | Should -Not -BeNullOrEmpty
         $result.Succeeded() | Should -BeTrue
         (Test-Path $result.DownloadedInstallerPath) | Should -BeTrue
+        $warnings | Should -BeNullOrEmpty
     }
 }

@@ -8,13 +8,13 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
-use std::path::Path;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{Cursor, Read};
+use std::path::Path;
 use std::path::PathBuf;
 #[cfg(windows)]
 use winreg::{RegKey, enums::*};
@@ -25,20 +25,31 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
 const DEFAULT_USER_AGENT: &str = "pinget-rs/0.1";
-const INSTALLED_STATE_UNSUPPORTED_WARNING: &str =
-    "Installed package discovery is not supported on this platform; returning no installed packages.";
+const INSTALLED_STATE_UNSUPPORTED_WARNING: &str = "Installed package discovery is not supported on this platform; returning no installed packages.";
 const INSTALL_UNSUPPORTED_WARNING: &str =
     "Installing packages is not supported on this platform; no changes were made.";
+const REPAIR_UNSUPPORTED_WARNING: &str =
+    "Repairing packages is not supported on this platform; no changes were made.";
+const REPAIR_REINSTALL_WARNING: &str =
+    "Pinget repair currently re-runs the package install flow for the selected package.";
 const UNINSTALL_UNSUPPORTED_WARNING: &str =
     "Uninstalling packages is not supported on this platform; no changes were made.";
+const SUPPORTED_ADMIN_SETTINGS: &[&str] = &[
+    "LocalManifestFiles",
+    "BypassCertificatePinningForMicrosoftStore",
+    "InstallerHashOverride",
+    "LocalArchiveMalwareScanOverride",
+    "ProxyCommandLineOptions",
+];
 const REST_SUPPORTED_CONTRACTS: &[&str] = &[
     "1.12.0", "1.10.0", "1.9.0", "1.7.0", "1.6.0", "1.5.0", "1.4.0", "1.1.0", "1.0.0",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub enum SourceKind {
+    #[serde(rename = "preIndexed", alias = "PreIndexed")]
     PreIndexed,
+    #[serde(rename = "rest", alias = "Rest")]
     Rest,
 }
 
@@ -57,6 +68,12 @@ pub struct SourceRecord {
     pub kind: SourceKind,
     pub arg: String,
     pub identifier: String,
+    #[serde(default = "default_source_trust_level")]
+    pub trust_level: String,
+    #[serde(default)]
+    pub explicit: bool,
+    #[serde(default)]
+    pub priority: i32,
     #[serde(default)]
     pub last_update: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -77,6 +94,9 @@ impl Default for SourceStore {
                     kind: SourceKind::PreIndexed,
                     arg: "https://cdn.winget.microsoft.com/cache".to_string(),
                     identifier: "Microsoft.Winget.Source_8wekyb3d8bbwe".to_string(),
+                    trust_level: "Trusted".to_string(),
+                    explicit: false,
+                    priority: 0,
                     last_update: None,
                     source_version: None,
                 },
@@ -85,6 +105,9 @@ impl Default for SourceStore {
                     kind: SourceKind::Rest,
                     arg: "https://storeedgefd.dsx.mp.microsoft.com/v9.0".to_string(),
                     identifier: "StoreEdgeFD".to_string(),
+                    trust_level: "Trusted".to_string(),
+                    explicit: false,
+                    priority: 0,
                     last_update: None,
                     source_version: None,
                 },
@@ -137,6 +160,8 @@ pub struct PackageQuery {
     pub locale: Option<String>,
     pub installer_type: Option<String>,
     pub installer_architecture: Option<String>,
+    pub platform: Option<String>,
+    pub os_version: Option<String>,
     pub install_scope: Option<String>,
 }
 
@@ -260,6 +285,8 @@ pub struct Installer {
     pub release_date: Option<String>,
     pub package_family_name: Option<String>,
     pub upgrade_code: Option<String>,
+    pub platforms: Vec<String>,
+    pub minimum_os_version: Option<String>,
     pub switches: InstallerSwitches,
     pub commands: Vec<String>,
     pub package_dependencies: Vec<String>,
@@ -297,6 +324,9 @@ pub struct InstallRequest {
     pub force: bool,
     pub rename: Option<String>,
     pub uninstall_previous: bool,
+    pub ignore_security_hash: bool,
+    pub dependency_source: Option<String>,
+    pub no_upgrade: bool,
 }
 
 impl InstallRequest {
@@ -315,6 +345,9 @@ impl InstallRequest {
             force: false,
             rename: None,
             uninstall_previous: false,
+            ignore_security_hash: false,
+            dependency_source: None,
+            no_upgrade: false,
         }
     }
 }
@@ -344,6 +377,33 @@ impl UninstallRequest {
             purge: false,
             preserve: false,
             log_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepairRequest {
+    pub query: PackageQuery,
+    pub manifest_path: Option<PathBuf>,
+    pub product_code: Option<String>,
+    pub mode: InstallerMode,
+    pub log_path: Option<PathBuf>,
+    pub accept_package_agreements: bool,
+    pub force: bool,
+    pub ignore_security_hash: bool,
+}
+
+impl RepairRequest {
+    pub fn new(query: PackageQuery) -> Self {
+        Self {
+            query,
+            manifest_path: None,
+            product_code: None,
+            mode: InstallerMode::SilentWithProgress,
+            log_path: None,
+            accept_package_agreements: false,
+            force: false,
+            ignore_security_hash: false,
         }
     }
 }
@@ -595,7 +655,24 @@ impl Repository {
     }
 
     pub fn add_source(&mut self, name: &str, arg: &str, kind: SourceKind) -> Result<()> {
-        if self.store.sources.iter().any(|s| s.name == name) {
+        self.add_source_with_metadata(name, arg, kind, None, false, 0)
+    }
+
+    pub fn add_source_with_metadata(
+        &mut self,
+        name: &str,
+        arg: &str,
+        kind: SourceKind,
+        trust_level: Option<&str>,
+        explicit: bool,
+        priority: i32,
+    ) -> Result<()> {
+        if self
+            .store
+            .sources
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(name))
+        {
             bail!("A source with name '{name}' already exists.");
         }
         if self.store.sources.iter().any(|s| s.arg == arg) {
@@ -607,9 +684,37 @@ impl Repository {
             kind,
             arg: arg.to_string(),
             identifier,
+            trust_level: normalize_source_trust_level(trust_level)?,
+            explicit,
+            priority,
             last_update: None,
             source_version: None,
         });
+        self.save_store()?;
+        Ok(())
+    }
+
+    pub fn edit_source(
+        &mut self,
+        name: &str,
+        explicit: Option<bool>,
+        trust_level: Option<&str>,
+    ) -> Result<()> {
+        let source = self
+            .store
+            .sources
+            .iter_mut()
+            .find(|source| source.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow!("Source '{name}' not found."))?;
+
+        if let Some(explicit) = explicit {
+            source.explicit = explicit;
+        }
+
+        if trust_level.is_some() {
+            source.trust_level = normalize_source_trust_level(trust_level)?;
+        }
+
         self.save_store()?;
         Ok(())
     }
@@ -619,7 +724,7 @@ impl Repository {
             .store
             .sources
             .iter()
-            .position(|s| s.name == name)
+            .position(|s| s.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| anyhow!("Source '{name}' not found."))?;
         let source = self.store.sources.remove(idx);
         // Clean up cached state for this source
@@ -627,6 +732,35 @@ impl Repository {
         if state_dir.exists() {
             let _ = fs::remove_dir_all(&state_dir);
         }
+        self.save_store()?;
+        Ok(())
+    }
+
+    pub fn reset_source(&mut self, name: &str) -> Result<()> {
+        let idx = self
+            .store
+            .sources
+            .iter()
+            .position(|source| source.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow!("Source '{name}' not found."))?;
+
+        let source = self.store.sources[idx].clone();
+        let state_dir = self.source_state_dir(&source);
+        if state_dir.exists() {
+            let _ = fs::remove_dir_all(&state_dir);
+        }
+
+        if let Some(default_source) = SourceStore::default()
+            .sources
+            .into_iter()
+            .find(|source| source.name.eq_ignore_ascii_case(name))
+        {
+            self.store.sources[idx] = default_source;
+        } else {
+            self.store.sources[idx].last_update = None;
+            self.store.sources[idx].source_version = None;
+        }
+
         self.save_store()?;
         Ok(())
     }
@@ -641,6 +775,106 @@ impl Repository {
         }
         self.store = SourceStore::default();
         self.save_store()?;
+        Ok(())
+    }
+
+    pub fn supported_admin_settings() -> &'static [&'static str] {
+        SUPPORTED_ADMIN_SETTINGS
+    }
+
+    pub fn get_user_settings(&self) -> Result<JsonValue> {
+        Ok(JsonValue::Object(load_json_object(&user_settings_path(
+            &self.app_root,
+        ))?))
+    }
+
+    pub fn set_user_settings(&self, user_settings: &JsonValue, merge: bool) -> Result<JsonValue> {
+        let update = match user_settings {
+            JsonValue::Object(object) => object.clone(),
+            _ => bail!("user settings must be a JSON object"),
+        };
+
+        let effective = if merge {
+            merge_json_objects(
+                &load_json_object(&user_settings_path(&self.app_root))?,
+                &update,
+            )
+        } else {
+            update
+        };
+        save_json_object(user_settings_path(&self.app_root), &effective)?;
+        Ok(JsonValue::Object(effective))
+    }
+
+    pub fn test_user_settings(&self, expected: &JsonValue, ignore_not_set: bool) -> Result<bool> {
+        let current = self.get_user_settings()?;
+        Ok(if ignore_not_set {
+            json_contains(&current, expected)
+        } else {
+            current == *expected
+        })
+    }
+
+    pub fn get_admin_settings(&self) -> Result<JsonValue> {
+        let mut settings = load_json_object(&admin_settings_path(&self.app_root))?;
+        for name in SUPPORTED_ADMIN_SETTINGS {
+            settings
+                .entry((*name).to_string())
+                .or_insert(JsonValue::Bool(false));
+        }
+
+        Ok(JsonValue::Object(settings))
+    }
+
+    pub fn set_admin_setting(&self, name: &str, enabled: bool) -> Result<()> {
+        let normalized = normalize_admin_setting_name(name)?;
+        let mut settings = match self.get_admin_settings()? {
+            JsonValue::Object(settings) => settings,
+            _ => JsonMap::new(),
+        };
+        settings.insert(normalized.to_string(), JsonValue::Bool(enabled));
+        save_json_object(admin_settings_path(&self.app_root), &settings)
+    }
+
+    pub fn reset_admin_setting(&self, name: Option<&str>, reset_all: bool) -> Result<()> {
+        if !reset_all && name.is_none() {
+            bail!("resetting admin settings requires a setting name or reset-all");
+        }
+
+        let mut settings = match self.get_admin_settings()? {
+            JsonValue::Object(settings) => settings,
+            _ => JsonMap::new(),
+        };
+
+        if reset_all {
+            for setting_name in SUPPORTED_ADMIN_SETTINGS {
+                settings.insert((*setting_name).to_string(), JsonValue::Bool(false));
+            }
+        } else {
+            settings.insert(
+                normalize_admin_setting_name(name.expect("checked above"))?.to_string(),
+                JsonValue::Bool(false),
+            );
+        }
+
+        save_json_object(admin_settings_path(&self.app_root), &settings)
+    }
+
+    pub fn ensure_settings_files(&self) -> Result<()> {
+        let user_settings = user_settings_path(&self.app_root);
+        if !user_settings.exists() {
+            save_json_object(user_settings, &JsonMap::new())?;
+        }
+
+        let admin_settings = admin_settings_path(&self.app_root);
+        if !admin_settings.exists() {
+            let mut values = JsonMap::new();
+            for name in SUPPORTED_ADMIN_SETTINGS {
+                values.insert((*name).to_string(), JsonValue::Bool(false));
+            }
+            save_json_object(admin_settings, &values)?;
+        }
+
         Ok(())
     }
 
@@ -748,16 +982,30 @@ impl Repository {
                 .then_with(|| left.local_id.cmp(&right.local_id))
         });
 
+        let pins = if query.upgrade_only {
+            self.list_pins(query.source.as_deref())?
+        } else {
+            Vec::new()
+        };
+        let mut list_matches = matches
+            .into_iter()
+            .map(list_match_from_installed)
+            .filter(|item| {
+                !query.upgrade_only
+                    || query.include_pinned
+                    || !is_upgrade_blocked_by_pin(item, &pins)
+            })
+            .collect::<Vec<_>>();
         let truncated = if let Some(limit) = query.count {
-            let was_truncated = matches.len() > limit;
-            matches.truncate(limit);
+            let was_truncated = list_matches.len() > limit;
+            list_matches.truncate(limit);
             was_truncated
         } else {
             false
         };
 
         Ok(ListResponse {
-            matches: matches.into_iter().map(list_match_from_installed).collect(),
+            matches: list_matches,
             warnings,
             truncated,
         })
@@ -784,6 +1032,8 @@ impl Repository {
             locale: None,
             installer_type: None,
             installer_architecture: None,
+            platform: None,
+            os_version: None,
             install_scope: None,
         };
         let (matches, warnings, _) = self.search_located(&all_query, SearchSemantics::Many)?;
@@ -819,7 +1069,8 @@ impl Repository {
 
     pub fn show(&mut self, query: &PackageQuery) -> Result<ShowResult> {
         let (located, warnings) = self.find_single_match(query)?;
-        let (manifest, manifest_documents, cached_files) = self.manifest_for_match(&located, query)?;
+        let (manifest, manifest_documents, cached_files) =
+            self.manifest_for_match(&located, query)?;
         let selected_installer = select_installer(&manifest.installers, query);
 
         Ok(ShowResult {
@@ -845,15 +1096,20 @@ impl Repository {
 
     // ── Pin management ──
 
-    pub fn list_pins(&self) -> Result<Vec<PinRecord>> {
+    pub fn list_pins(&self, source_id: Option<&str>) -> Result<Vec<PinRecord>> {
         let db_path = pins_db_path(&self.app_root);
         if !db_path.exists() {
             return Ok(Vec::new());
         }
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut stmt = conn.prepare("SELECT package_id, version, source_id, pin_type FROM pin")?;
-        let rows = stmt
-            .query_map([], |row| {
+        let sql = if source_id.is_some() {
+            "SELECT package_id, version, source_id, pin_type FROM pin WHERE source_id = ?1"
+        } else {
+            "SELECT package_id, version, source_id, pin_type FROM pin"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if let Some(source_id) = source_id {
+            stmt.query_map([source_id], |row| {
                 let pin_type_int: i64 = row.get(3)?;
                 Ok(PinRecord {
                     package_id: row.get(0)?,
@@ -867,7 +1123,24 @@ impl Repository {
                 })
             })?
             .filter_map(|r| r.ok())
-            .collect();
+            .collect()
+        } else {
+            stmt.query_map([], |row| {
+                let pin_type_int: i64 = row.get(3)?;
+                Ok(PinRecord {
+                    package_id: row.get(0)?,
+                    version: row.get(1)?,
+                    source_id: row.get(2)?,
+                    pin_type: match pin_type_int {
+                        1 => PinType::Blocking,
+                        2 => PinType::Gating,
+                        _ => PinType::Pinning,
+                    },
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect()
+        };
         Ok(rows)
     }
 
@@ -901,22 +1174,39 @@ impl Repository {
         Ok(())
     }
 
-    pub fn remove_pin(&self, package_id: &str) -> Result<bool> {
+    pub fn remove_pin(&self, package_id: &str, source_id: Option<&str>) -> Result<bool> {
         let db_path = pins_db_path(&self.app_root);
         if !db_path.exists() {
             return Ok(false);
         }
         let conn = Connection::open(&db_path)?;
-        let count = conn.execute(
-            "DELETE FROM pin WHERE package_id = ?1",
-            rusqlite::params![package_id],
-        )?;
+        let count = if let Some(source_id) = source_id {
+            conn.execute(
+                "DELETE FROM pin WHERE package_id = ?1 AND source_id = ?2",
+                rusqlite::params![package_id, source_id],
+            )?
+        } else {
+            conn.execute(
+                "DELETE FROM pin WHERE package_id = ?1",
+                rusqlite::params![package_id],
+            )?
+        };
         Ok(count > 0)
     }
 
-    pub fn reset_pins(&self) -> Result<()> {
+    pub fn reset_pins(&self, source_id: Option<&str>) -> Result<()> {
         let db_path = pins_db_path(&self.app_root);
-        if db_path.exists() {
+        if !db_path.exists() {
+            return Ok(());
+        }
+
+        if let Some(source_id) = source_id {
+            let conn = Connection::open(&db_path)?;
+            conn.execute(
+                "DELETE FROM pin WHERE source_id = ?1",
+                rusqlite::params![source_id],
+            )?;
+        } else {
             fs::remove_file(&db_path)?;
         }
         Ok(())
@@ -975,15 +1265,13 @@ impl Repository {
         let bytes = response.bytes()?;
         fs::write(&dest, &bytes)?;
 
-        // Verify hash
-        if let Some(ref expected_sha) = installer.sha256 {
-            let actual = sha256_hex(&bytes);
-            if !actual.eq_ignore_ascii_case(expected_sha) {
-                let _ = fs::remove_file(&dest);
-                bail!(
-                    "Installer hash mismatch. Expected: {expected_sha}, Got: {actual}"
-                );
-            }
+        if let Err(error) = verify_installer_hash(
+            installer.sha256.as_deref(),
+            &bytes,
+            request.ignore_security_hash,
+        ) {
+            let _ = fs::remove_file(&dest);
+            return Err(error);
         }
 
         Ok((manifest, dest))
@@ -1024,6 +1312,13 @@ impl Repository {
             ));
         }
 
+        let existing_match = self.find_installed_package_for_install(request, &manifest)?;
+        if let Some(no_op_result) =
+            Self::create_install_no_op_result(request, &manifest, existing_match.as_ref())
+        {
+            return Ok(no_op_result);
+        }
+
         self.ensure_package_agreements_accepted(&manifest, request)?;
         self.install_dependencies(&manifest, request, &mut HashSet::new())?;
 
@@ -1045,8 +1340,16 @@ impl Repository {
 
         if request.uninstall_previous {
             let mut uninstall_request = UninstallRequest::new(PackageQuery {
-                id: request.query.id.clone().or_else(|| Some(manifest.id.clone())),
-                query: request.query.query.clone().or_else(|| Some(manifest.id.clone())),
+                id: request
+                    .query
+                    .id
+                    .clone()
+                    .or_else(|| Some(manifest.id.clone())),
+                query: request
+                    .query
+                    .query
+                    .clone()
+                    .or_else(|| Some(manifest.id.clone())),
                 source: request.query.source.clone(),
                 exact: true,
                 version: request.query.version.clone(),
@@ -1068,8 +1371,13 @@ impl Repository {
             .unwrap_or("exe")
             .to_lowercase();
 
-        let exit_code =
-            dispatch_installer(&installer_path, &installer_type, request, &manifest, &installer)?;
+        let exit_code = dispatch_installer(
+            &installer_path,
+            &installer_type,
+            request,
+            &manifest,
+            &installer,
+        )?;
 
         Ok(InstallResult {
             package_id: manifest.id.clone(),
@@ -1081,6 +1389,128 @@ impl Repository {
             no_op: false,
             warnings: Vec::new(),
         })
+    }
+
+    fn find_installed_package_for_install(
+        &mut self,
+        request: &InstallRequest,
+        manifest: &Manifest,
+    ) -> Result<Option<ListMatch>> {
+        let installed_matches = self.list(&ListQuery {
+            query: request.query.query.clone(),
+            id: request
+                .query
+                .id
+                .clone()
+                .or_else(|| Some(manifest.id.clone())),
+            name: request.query.name.clone(),
+            moniker: request.query.moniker.clone(),
+            tag: None,
+            command: None,
+            product_code: None,
+            version: None,
+            source: request.query.source.clone(),
+            count: Some(100),
+            exact: request.query.exact || !manifest.id.trim().is_empty(),
+            install_scope: request.query.install_scope.clone(),
+            upgrade_only: false,
+            include_unknown: false,
+            include_pinned: false,
+        })?;
+
+        Ok(installed_matches.matches.into_iter().find(|candidate| {
+            candidate.id.eq_ignore_ascii_case(&manifest.id)
+                || candidate.local_id.eq_ignore_ascii_case(&manifest.id)
+        }))
+    }
+
+    fn create_install_no_op_result(
+        request: &InstallRequest,
+        manifest: &Manifest,
+        existing_match: Option<&ListMatch>,
+    ) -> Option<InstallResult> {
+        let existing_match = existing_match?;
+
+        if request.no_upgrade {
+            return Some(InstallResult {
+                package_id: manifest.id.clone(),
+                version: existing_match.installed_version.clone(),
+                installer_path: PathBuf::new(),
+                installer_type: "install".to_string(),
+                exit_code: 0,
+                success: true,
+                no_op: true,
+                warnings: vec![
+                    "Package is already installed; skipping because --no-upgrade was specified."
+                        .to_string(),
+                ],
+            });
+        }
+
+        if !request.force
+            && !existing_match.installed_version.trim().is_empty()
+            && compare_version(&existing_match.installed_version, &manifest.version)
+                != Ordering::Less
+        {
+            return Some(InstallResult {
+                package_id: manifest.id.clone(),
+                version: existing_match.installed_version.clone(),
+                installer_path: PathBuf::new(),
+                installer_type: "install".to_string(),
+                exit_code: 0,
+                success: true,
+                no_op: true,
+                warnings: vec![
+                    "Package is already installed and up to date; rerun with --force to reinstall."
+                        .to_string(),
+                ],
+            });
+        }
+
+        None
+    }
+
+    pub fn repair(&mut self, request: &RepairRequest) -> Result<InstallResult> {
+        if request.manifest_path.is_none() && !package_actions_supported() {
+            let package_id = request
+                .query
+                .id
+                .clone()
+                .or_else(|| request.query.name.clone())
+                .or_else(|| request.query.moniker.clone())
+                .or_else(|| request.query.query.clone())
+                .or_else(|| request.product_code.clone())
+                .unwrap_or_else(|| "repair".to_string());
+            return Ok(unsupported_action_result(
+                package_id,
+                request.query.version.clone().unwrap_or_default(),
+                "repair".to_string(),
+                REPAIR_UNSUPPORTED_WARNING,
+            ));
+        }
+
+        let mut warnings = vec![REPAIR_REINSTALL_WARNING.to_string()];
+        let installed_match = if request.manifest_path.is_some() {
+            None
+        } else {
+            let installed = self.list(&Self::create_repair_list_query(request))?;
+            warnings.extend(installed.warnings);
+            if installed.matches.is_empty() {
+                bail!("No installed package matched the supplied repair query.");
+            }
+            if installed.matches.len() > 1 {
+                bail!("Multiple installed packages matched the supplied repair query.");
+            }
+            installed.matches.into_iter().next()
+        };
+
+        let mut result = self.install_request(&Self::create_repair_install_request(
+            request,
+            installed_match.as_ref(),
+        ))?;
+        warnings.extend(result.warnings);
+        result.warnings = warnings;
+        Ok(result)
     }
 
     pub fn uninstall(&mut self, query: &PackageQuery, silent: bool) -> Result<InstallResult> {
@@ -1097,7 +1527,10 @@ impl Repository {
         if !package_actions_supported() {
             let (package_id, version) = if let Some(path) = &request.manifest_path {
                 let manifest = self.load_manifest_from_path(path)?;
-                (manifest.id, request.query.version.clone().unwrap_or(manifest.version))
+                (
+                    manifest.id,
+                    request.query.version.clone().unwrap_or(manifest.version),
+                )
             } else {
                 (
                     request
@@ -1166,7 +1599,9 @@ impl Repository {
         request: &InstallRequest,
     ) -> Result<()> {
         if !request.accept_package_agreements && !manifest.agreements.is_empty() {
-            bail!("Package agreements are present; rerun with --accept-package-agreements to continue.");
+            bail!(
+                "Package agreements are present; rerun with --accept-package-agreements to continue."
+            );
         }
         Ok(())
     }
@@ -1201,17 +1636,93 @@ impl Repository {
 
             let mut dependency_request = InstallRequest::new(PackageQuery {
                 id: Some(dependency_id),
-                source: request.query.source.clone(),
+                source: request
+                    .dependency_source
+                    .clone()
+                    .or_else(|| request.query.source.clone()),
                 exact: true,
                 ..PackageQuery::default()
             });
             dependency_request.mode = request.mode;
             dependency_request.accept_package_agreements = request.accept_package_agreements;
             dependency_request.force = request.force;
+            dependency_request.ignore_security_hash = request.ignore_security_hash;
+            dependency_request.dependency_source = request.dependency_source.clone();
             self.install_request(&dependency_request)?;
         }
 
         Ok(())
+    }
+
+    fn create_repair_list_query(request: &RepairRequest) -> ListQuery {
+        ListQuery {
+            query: request.query.query.clone(),
+            id: request.query.id.clone(),
+            name: request.query.name.clone(),
+            moniker: request.query.moniker.clone(),
+            product_code: request.product_code.clone(),
+            version: request.query.version.clone(),
+            source: request.query.source.clone(),
+            count: Some(100),
+            exact: request.query.exact,
+            install_scope: request.query.install_scope.clone(),
+            ..ListQuery::default()
+        }
+    }
+
+    fn create_repair_install_request(
+        request: &RepairRequest,
+        installed_match: Option<&ListMatch>,
+    ) -> InstallRequest {
+        let mut query = request.query.clone();
+        query.query = if installed_match.is_none() {
+            request.query.query.clone()
+        } else {
+            None
+        };
+        query.id = installed_match
+            .map(|item| item.id.clone())
+            .or_else(|| request.query.id.clone());
+        query.name = if installed_match.is_none() {
+            request.query.name.clone()
+        } else {
+            None
+        };
+        query.moniker = if installed_match.is_none() {
+            request.query.moniker.clone()
+        } else {
+            None
+        };
+        query.source = request
+            .query
+            .source
+            .clone()
+            .or_else(|| installed_match.and_then(|item| item.source_name.clone()));
+        query.exact = true;
+        query.version = request
+            .query
+            .version
+            .clone()
+            .or_else(|| installed_match.map(|item| item.installed_version.clone()));
+
+        InstallRequest {
+            query,
+            manifest_path: request.manifest_path.clone(),
+            mode: request.mode,
+            log_path: request.log_path.clone(),
+            custom: None,
+            override_args: None,
+            install_location: None,
+            skip_dependencies: false,
+            dependencies_only: false,
+            accept_package_agreements: request.accept_package_agreements,
+            force: true,
+            rename: None,
+            uninstall_previous: false,
+            ignore_security_hash: request.ignore_security_hash,
+            dependency_source: None,
+            no_upgrade: false,
+        }
     }
 
     fn resolve_uninstall_matches(&mut self, request: &UninstallRequest) -> Result<Vec<ListMatch>> {
@@ -1225,7 +1736,10 @@ impl Repository {
                 id: Some(manifest.id.clone()),
                 name: Some(manifest.name.clone()),
                 exact: true,
-                version: effective_query.version.clone().or_else(|| Some(manifest.version)),
+                version: effective_query
+                    .version
+                    .clone()
+                    .or_else(|| Some(manifest.version)),
                 ..PackageQuery::default()
             };
             effective_product_code = effective_product_code.or_else(|| {
@@ -1246,7 +1760,11 @@ impl Repository {
             product_code: effective_product_code,
             version: effective_query.version.clone(),
             source: effective_query.source.clone(),
-            count: if request.all_versions { None } else { Some(100) },
+            count: if request.all_versions {
+                None
+            } else {
+                Some(100)
+            },
             exact: effective_query.exact,
             install_scope: effective_query.install_scope.clone(),
             upgrade_only: false,
@@ -1259,7 +1777,9 @@ impl Repository {
             bail!("No installed package found matching the query");
         }
         if !request.all_versions && list_result.matches.len() > 1 && !request.force {
-            bail!("Multiple installed packages matched the query; refine the query or use --all-versions.");
+            bail!(
+                "Multiple installed packages matched the query; refine the query or use --all-versions."
+            );
         }
 
         Ok(if request.all_versions {
@@ -1913,7 +2433,20 @@ impl Repository {
             return Ok(vec![index]);
         }
 
-        Ok((0..self.store.sources.len()).collect())
+        let mut indexes: Vec<_> = self
+            .store
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| !source.explicit)
+            .collect();
+        indexes.sort_by(|(left_index, left_source), (right_index, right_source)| {
+            right_source
+                .priority
+                .cmp(&left_source.priority)
+                .then_with(|| left_index.cmp(right_index))
+        });
+        Ok(indexes.into_iter().map(|(index, _)| index).collect())
     }
 
     fn source_clone(&self, index: usize) -> SourceRecord {
@@ -1984,6 +2517,8 @@ fn package_query_from_list_query(query: &ListQuery) -> PackageQuery {
         locale: None,
         installer_type: None,
         installer_architecture: None,
+        platform: None,
+        os_version: None,
         install_scope: query.install_scope.clone(),
     }
 }
@@ -2011,6 +2546,69 @@ fn installed_package_matches_upgrade_filter(package: &InstalledPackage, query: &
         || (query.include_unknown
             && installed_package_has_unknown_version(package)
             && package.correlated.is_some())
+}
+
+fn find_applicable_pin<'a>(item: &ListMatch, pins: &'a [PinRecord]) -> Option<&'a PinRecord> {
+    let mut source_specific = None;
+    let mut source_agnostic = None;
+
+    for pin in pins {
+        if !pin.package_id.eq_ignore_ascii_case(&item.id)
+            && !pin.package_id.eq_ignore_ascii_case(&item.local_id)
+        {
+            continue;
+        }
+
+        if pin.source_id.is_empty() {
+            if source_agnostic.is_none() {
+                source_agnostic = Some(pin);
+            }
+        } else if item
+            .source_name
+            .as_deref()
+            .is_some_and(|source| pin.source_id.eq_ignore_ascii_case(source))
+        {
+            source_specific = Some(pin);
+            break;
+        }
+    }
+
+    source_specific.or(source_agnostic)
+}
+
+fn is_upgrade_blocked_by_pin(item: &ListMatch, pins: &[PinRecord]) -> bool {
+    let Some(available_version) = item.available_version.as_deref() else {
+        return false;
+    };
+    let Some(pin) = find_applicable_pin(item, pins) else {
+        return false;
+    };
+
+    match pin.pin_type {
+        PinType::Blocking => true,
+        PinType::Gating | PinType::Pinning => {
+            !version_matches_pin_pattern(available_version, &pin.version)
+        }
+    }
+}
+
+fn version_matches_pin_pattern(version: &str, pattern: &str) -> bool {
+    if pattern.trim().is_empty() || pattern == "*" {
+        return true;
+    }
+
+    if !pattern.contains('*') {
+        return version.eq_ignore_ascii_case(pattern);
+    }
+
+    if pattern.ends_with('*') && pattern.matches('*').count() == 1 {
+        let prefix = &pattern[..pattern.len() - 1];
+        return version
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase());
+    }
+
+    version.eq_ignore_ascii_case(pattern)
 }
 
 fn list_match_from_installed(package: InstalledPackage) -> ListMatch {
@@ -2499,6 +3097,14 @@ fn store_path(app_root: &Path) -> PathBuf {
     app_root.join("sources.json")
 }
 
+fn user_settings_path(app_root: &Path) -> PathBuf {
+    app_root.join("user-settings.json")
+}
+
+fn admin_settings_path(app_root: &Path) -> PathBuf {
+    app_root.join("admin-settings.json")
+}
+
 fn source_state_dir(app_root: &Path, source: &SourceRecord) -> PathBuf {
     app_root.join("sources").join(
         source
@@ -2560,6 +3166,23 @@ fn save_store(app_root: &Path, store: &SourceStore) -> Result<()> {
     write_json(store_path(app_root), store)
 }
 
+fn load_json_object(path: &Path) -> Result<JsonMap<String, JsonValue>> {
+    if !path.exists() {
+        return Ok(JsonMap::new());
+    }
+
+    let bytes = fs::read(path).context("failed to read JSON file")?;
+    let value: JsonValue = serde_json::from_slice(&bytes).context("failed to parse JSON file")?;
+    Ok(match value {
+        JsonValue::Object(object) => object,
+        _ => JsonMap::new(),
+    })
+}
+
+fn save_json_object(path: PathBuf, value: &JsonMap<String, JsonValue>) -> Result<()> {
+    write_json(path, value)
+}
+
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("failed to create JSON parent directory")?;
@@ -2567,6 +3190,80 @@ fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
 
     let bytes = serde_json::to_vec_pretty(value).context("failed to serialize JSON")?;
     fs::write(path, bytes).context("failed to write JSON file")
+}
+
+fn merge_json_objects(
+    current: &JsonMap<String, JsonValue>,
+    update: &JsonMap<String, JsonValue>,
+) -> JsonMap<String, JsonValue> {
+    let mut merged = current.clone();
+    for (key, value) in update {
+        match (merged.get(key), value) {
+            (Some(JsonValue::Object(current_object)), JsonValue::Object(update_object)) => {
+                merged.insert(
+                    key.clone(),
+                    JsonValue::Object(merge_json_objects(current_object, update_object)),
+                );
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    merged
+}
+
+fn json_contains(current: &JsonValue, expected: &JsonValue) -> bool {
+    match expected {
+        JsonValue::Object(expected_object) => match current {
+            JsonValue::Object(current_object) => {
+                expected_object.iter().all(|(key, expected_child)| {
+                    current_object
+                        .get(key)
+                        .is_some_and(|current_child| json_contains(current_child, expected_child))
+                })
+            }
+            _ => false,
+        },
+        JsonValue::Array(expected_array) => match current {
+            JsonValue::Array(current_array) => {
+                current_array.len() == expected_array.len()
+                    && current_array.iter().zip(expected_array.iter()).all(
+                        |(current_child, expected_child)| {
+                            json_contains(current_child, expected_child)
+                        },
+                    )
+            }
+            _ => false,
+        },
+        _ => current == expected,
+    }
+}
+
+fn normalize_source_trust_level(trust_level: Option<&str>) -> Result<String> {
+    match trust_level
+        .unwrap_or("none")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "none" | "default" => Ok("None".to_string()),
+        "trusted" => Ok("Trusted".to_string()),
+        other => bail!("unsupported source trust level: {other}"),
+    }
+}
+
+fn normalize_admin_setting_name(name: &str) -> Result<&'static str> {
+    SUPPORTED_ADMIN_SETTINGS
+        .iter()
+        .copied()
+        .find(|setting| setting.eq_ignore_ascii_case(name))
+        .ok_or_else(|| anyhow!("unsupported admin setting: {name}"))
+}
+
+fn default_source_trust_level() -> String {
+    "None".to_string()
 }
 
 fn query_rows<T, F>(
@@ -3436,7 +4133,9 @@ fn resolve_manifest_path(manifest_path: &Path) -> Result<PathBuf> {
         .filter(|path| {
             path.extension()
                 .and_then(|value| value.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
+                })
         })
         .min();
 
@@ -3540,30 +4239,30 @@ fn parse_yaml_manifest_bundle(bytes: &[u8]) -> Result<(Manifest, JsonValue)> {
 
     Ok((
         Manifest {
-        id,
-        name,
-        version,
-        channel: yaml_string_from_root(&merged, "Channel").unwrap_or_default(),
-        publisher: yaml_localized_string(&merged, "Publisher"),
-        description: yaml_localized_string(&merged, "Description")
-            .or_else(|| yaml_localized_string(&merged, "ShortDescription")),
-        moniker: yaml_string_from_root(&merged, "Moniker"),
-        package_url: yaml_localized_string(&merged, "PackageUrl"),
-        publisher_url: yaml_localized_string(&merged, "PublisherUrl"),
-        publisher_support_url: yaml_localized_string(&merged, "PublisherSupportUrl"),
-        license: yaml_localized_string(&merged, "License"),
-        license_url: yaml_localized_string(&merged, "LicenseUrl"),
-        privacy_url: yaml_localized_string(&merged, "PrivacyUrl"),
-        author: yaml_localized_string(&merged, "Author"),
-        copyright: yaml_localized_string(&merged, "Copyright"),
-        copyright_url: yaml_localized_string(&merged, "CopyrightUrl"),
-        release_notes: yaml_localized_string(&merged, "ReleaseNotes"),
-        release_notes_url: yaml_localized_string(&merged, "ReleaseNotesUrl"),
-        tags: yaml_string_list(&merged, "Tags"),
-        agreements: yaml_agreement_list(&merged),
-        package_dependencies: yaml_package_dependencies(&merged),
-        documentation: yaml_documentation_list(&merged),
-        installers,
+            id,
+            name,
+            version,
+            channel: yaml_string_from_root(&merged, "Channel").unwrap_or_default(),
+            publisher: yaml_localized_string(&merged, "Publisher"),
+            description: yaml_localized_string(&merged, "Description")
+                .or_else(|| yaml_localized_string(&merged, "ShortDescription")),
+            moniker: yaml_string_from_root(&merged, "Moniker"),
+            package_url: yaml_localized_string(&merged, "PackageUrl"),
+            publisher_url: yaml_localized_string(&merged, "PublisherUrl"),
+            publisher_support_url: yaml_localized_string(&merged, "PublisherSupportUrl"),
+            license: yaml_localized_string(&merged, "License"),
+            license_url: yaml_localized_string(&merged, "LicenseUrl"),
+            privacy_url: yaml_localized_string(&merged, "PrivacyUrl"),
+            author: yaml_localized_string(&merged, "Author"),
+            copyright: yaml_localized_string(&merged, "Copyright"),
+            copyright_url: yaml_localized_string(&merged, "CopyrightUrl"),
+            release_notes: yaml_localized_string(&merged, "ReleaseNotes"),
+            release_notes_url: yaml_localized_string(&merged, "ReleaseNotesUrl"),
+            tags: yaml_string_list(&merged, "Tags"),
+            agreements: yaml_agreement_list(&merged),
+            package_dependencies: yaml_package_dependencies(&merged),
+            documentation: yaml_documentation_list(&merged),
+            installers,
         },
         collapse_structured_document(&JsonValue::Array(documents)),
     ))
@@ -3603,6 +4302,8 @@ fn parse_rest_manifest(
     let name = json_string(default_locale, "PackageName")
         .ok_or_else(|| anyhow!("REST manifest response missing PackageName"))?;
     let installer_switch_defaults = json_installer_switches(selected);
+    let top_platforms = json_string_list(selected, "Platform");
+    let top_minimum_os_version = json_string(selected, "MinimumOSVersion");
 
     let installers = selected
         .get("Installers")
@@ -3611,6 +4312,16 @@ fn parse_rest_manifest(
             items
                 .iter()
                 .map(|item| Installer {
+                    platforms: {
+                        let platforms = json_string_list(item, "Platform");
+                        if platforms.is_empty() {
+                            top_platforms.clone()
+                        } else {
+                            platforms
+                        }
+                    },
+                    minimum_os_version: json_string(item, "MinimumOSVersion")
+                        .or_else(|| top_minimum_os_version.clone()),
                     architecture: json_string(item, "Architecture"),
                     installer_type: json_string(item, "InstallerType"),
                     url: json_string(item, "InstallerUrl"),
@@ -3708,15 +4419,26 @@ fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
         version,
         &["PackageIdentifier", "PackageVersion"],
     );
-    copy_all_manifest_keys_except(&mut singleton, default_locale, &["ManifestType", "ManifestVersion"]);
-    copy_all_manifest_keys_except(&mut singleton, installer, &["ManifestType", "ManifestVersion"]);
+    copy_all_manifest_keys_except(
+        &mut singleton,
+        default_locale,
+        &["ManifestType", "ManifestVersion"],
+    );
+    copy_all_manifest_keys_except(
+        &mut singleton,
+        installer,
+        &["ManifestType", "ManifestVersion"],
+    );
 
     if !singleton.contains_key("PackageLocale") {
         if let Some(package_locale) = default_locale
             .and_then(|document| json_string(document, "PackageLocale"))
             .or_else(|| version.and_then(|document| json_string(document, "DefaultLocale")))
         {
-            singleton.insert("PackageLocale".to_string(), JsonValue::String(package_locale));
+            singleton.insert(
+                "PackageLocale".to_string(),
+                JsonValue::String(package_locale),
+            );
         }
     }
 
@@ -3729,7 +4451,9 @@ fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
         JsonValue::String(
             installer
                 .and_then(|document| json_string(document, "ManifestVersion"))
-                .or_else(|| default_locale.and_then(|document| json_string(document, "ManifestVersion")))
+                .or_else(|| {
+                    default_locale.and_then(|document| json_string(document, "ManifestVersion"))
+                })
                 .or_else(|| version.and_then(|document| json_string(document, "ManifestVersion")))
                 .unwrap_or_else(|| "1.10.0".to_string()),
         ),
@@ -3747,8 +4471,7 @@ fn is_merged_manifest_document(document: &JsonValue) -> bool {
 }
 
 fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
-    let package_identifier =
-        json_string(merged, "PackageIdentifier").unwrap_or_default();
+    let package_identifier = json_string(merged, "PackageIdentifier").unwrap_or_default();
     let package_version = json_string(merged, "PackageVersion").unwrap_or_default();
     let package_locale =
         json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
@@ -3803,7 +4526,9 @@ fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
     );
     default_locale_document.insert(
         "PackageLocale".to_string(),
-        JsonValue::String(json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string())),
+        JsonValue::String(
+            json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string()),
+        ),
     );
     default_locale_document.insert(
         "ManifestType".to_string(),
@@ -3811,7 +4536,9 @@ fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
     );
     default_locale_document.insert(
         "ManifestVersion".to_string(),
-        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string())),
+        JsonValue::String(
+            json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string()),
+        ),
     );
 
     let mut installer_document = project_manifest_document(
@@ -3872,7 +4599,9 @@ fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
     );
     installer_document.insert(
         "ManifestVersion".to_string(),
-        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string())),
+        JsonValue::String(
+            json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string()),
+        ),
     );
 
     vec![
@@ -3895,7 +4624,11 @@ fn project_manifest_document(source: &JsonValue, keys: &[&str]) -> JsonMap<Strin
     result
 }
 
-fn copy_manifest_keys(target: &mut JsonMap<String, JsonValue>, source: Option<&JsonValue>, keys: &[&str]) {
+fn copy_manifest_keys(
+    target: &mut JsonMap<String, JsonValue>,
+    source: Option<&JsonValue>,
+    keys: &[&str],
+) {
     if let Some(source) = source.and_then(JsonValue::as_object) {
         for key in keys {
             if let Some(value) = source.get(*key) {
@@ -3912,7 +4645,10 @@ fn copy_all_manifest_keys_except(
 ) {
     if let Some(source) = source.and_then(JsonValue::as_object) {
         for (key, value) in source {
-            if !excluded_keys.iter().any(|excluded| key.eq_ignore_ascii_case(excluded)) {
+            if !excluded_keys
+                .iter()
+                .any(|excluded| key.eq_ignore_ascii_case(excluded))
+            {
                 target.insert(key.clone(), value.clone());
             }
         }
@@ -3927,8 +4663,8 @@ fn build_rest_manifest_documents(
     version: &str,
     channel: &str,
 ) -> JsonValue {
-    let package_identifier = json_string(data, "PackageIdentifier")
-        .unwrap_or_else(|| package_id.to_string());
+    let package_identifier =
+        json_string(data, "PackageIdentifier").unwrap_or_else(|| package_id.to_string());
     let package_locale =
         json_string(default_locale, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
     let manifest_version = json_string(installer_source, "ManifestVersion")
@@ -4058,6 +4794,8 @@ fn installer_defaults(root: &YamlMapping) -> YamlMapping {
         "InstallerSha256",
         "ProductCode",
         "InstallerLocale",
+        "Platform",
+        "MinimumOSVersion",
         "Scope",
         "ReleaseDate",
         "PackageFamilyName",
@@ -4085,6 +4823,8 @@ fn installer_from_yaml(root: &YamlMapping, switches: InstallerSwitches) -> Insta
         release_date: yaml_string(root, "ReleaseDate"),
         package_family_name: yaml_string(root, "PackageFamilyName"),
         upgrade_code: yaml_string(root, "UpgradeCode"),
+        platforms: yaml_string_list(root, "Platform"),
+        minimum_os_version: yaml_string(root, "MinimumOSVersion"),
         switches,
         commands: yaml_string_list(root, "Commands"),
         package_dependencies: yaml_package_dependencies(root),
@@ -4101,7 +4841,11 @@ fn yaml_installer_switches(root: &YamlMapping) -> InstallerSwitches {
 
 fn yaml_installer_switches_from_mapping(mapping: Option<&YamlMapping>) -> InstallerSwitches {
     let string = |key: &str| {
-        mapping.and_then(|mapping| mapping.get(YamlValue::from(key)).and_then(yaml_scalar_string))
+        mapping.and_then(|mapping| {
+            mapping
+                .get(YamlValue::from(key))
+                .and_then(yaml_scalar_string)
+        })
     };
 
     InstallerSwitches {
@@ -4386,13 +5130,25 @@ fn select_installer(installers: &[Installer], query: &PackageQuery) -> Option<In
     let requested_architecture = query.installer_architecture.as_deref();
     let requested_type = query.installer_type.as_deref();
     let requested_scope = query.install_scope.as_deref();
+    let requested_platform = query.platform.as_deref();
+    let requested_os_version = query.os_version.as_deref();
     let system_architecture = current_architecture();
+    let system_platform = current_platform();
+    let current_os_version = current_os_version();
 
     installers
         .iter()
         .enumerate()
         .filter(|(_, installer)| {
-            installer_matches_requested(installer, requested_type, requested_scope)
+            installer_matches_requested(
+                installer,
+                requested_type,
+                requested_scope,
+                requested_platform,
+                requested_os_version,
+                system_platform,
+                current_os_version.as_deref(),
+            )
         })
         .filter(|(_, installer)| {
             installer_matches_architecture(installer, requested_architecture, system_architecture)
@@ -4416,9 +5172,56 @@ fn installer_matches_requested(
     installer: &Installer,
     requested_type: Option<&str>,
     requested_scope: Option<&str>,
+    requested_platform: Option<&str>,
+    requested_os_version: Option<&str>,
+    system_platform: Option<&str>,
+    current_os_version: Option<&str>,
 ) -> bool {
     matches_optional_ci(installer.installer_type.as_deref(), requested_type)
         && matches_optional_ci(installer.scope.as_deref(), requested_scope)
+        && installer_matches_platform(installer, requested_platform, system_platform)
+        && installer_matches_os_version(installer, requested_os_version, current_os_version)
+}
+
+fn installer_matches_platform(
+    installer: &Installer,
+    requested_platform: Option<&str>,
+    system_platform: Option<&str>,
+) -> bool {
+    if installer.platforms.is_empty() {
+        return true;
+    }
+
+    let Some(effective_platform) = requested_platform.or(system_platform) else {
+        return true;
+    };
+
+    installer
+        .platforms
+        .iter()
+        .any(|platform| platform.eq_ignore_ascii_case(effective_platform))
+}
+
+fn installer_matches_os_version(
+    installer: &Installer,
+    requested_os_version: Option<&str>,
+    current_os_version: Option<&str>,
+) -> bool {
+    let Some(minimum_os_version) = installer.minimum_os_version.as_deref() else {
+        return true;
+    };
+
+    let Some(actual_os_version) = requested_os_version.or(current_os_version) else {
+        return true;
+    };
+
+    match (
+        parse_dotted_version(minimum_os_version),
+        parse_dotted_version(actual_os_version),
+    ) {
+        (Some(minimum), Some(actual)) => actual.cmp(&minimum) != Ordering::Less,
+        _ => minimum_os_version.eq_ignore_ascii_case(actual_os_version),
+    }
 }
 
 fn installer_matches_architecture(
@@ -4525,6 +5328,48 @@ fn current_architecture() -> &'static str {
         "x86" => "x86",
         "aarch64" => "arm64",
         _ => "neutral",
+    }
+}
+
+fn current_platform() -> Option<&'static str> {
+    if cfg!(windows) {
+        Some("Windows.Desktop")
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn current_os_version() -> Option<String> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm
+        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .ok()?;
+    let build: String = key.get_value("CurrentBuildNumber").ok()?;
+    let ubr: u32 = key.get_value("UBR").unwrap_or(0);
+    let major: u32 = key.get_value("CurrentMajorVersionNumber").unwrap_or(10);
+    let minor: u32 = key.get_value("CurrentMinorVersionNumber").unwrap_or(0);
+    Some(format!("{major}.{minor}.{build}.{ubr}"))
+}
+
+#[cfg(not(windows))]
+fn current_os_version() -> Option<String> {
+    None
+}
+
+fn parse_dotted_version(version: &str) -> Option<Vec<u64>> {
+    let mut parsed = Vec::new();
+    for component in version.split('.') {
+        if component.is_empty() {
+            continue;
+        }
+        parsed.push(component.parse().ok()?);
+    }
+
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
     }
 }
 
@@ -4689,6 +5534,25 @@ fn verify_hash(expected_hash: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn verify_installer_hash(
+    expected_hash: Option<&str>,
+    bytes: &[u8],
+    ignore_security_hash: bool,
+) -> Result<()> {
+    let Some(expected_hash) = expected_hash else {
+        return Ok(());
+    };
+    if ignore_security_hash {
+        return Ok(());
+    }
+
+    if !hash_matches(Some(expected_hash), bytes) {
+        let actual = sha256_hex(bytes);
+        bail!("Installer hash mismatch. Expected: {expected_hash}, Got: {actual}");
+    }
+    Ok(())
+}
+
 fn hash_matches(expected_hash: Option<&str>, bytes: &[u8]) -> bool {
     expected_hash
         .map(|expected| sha256_hex(bytes).eq_ignore_ascii_case(expected))
@@ -4735,12 +5599,10 @@ fn dispatch_installer(
         }
         "msix" | "appx" => {
             let mut cmd = Command::new("powershell");
-            cmd.arg("-NoProfile")
-                .arg("-Command")
-                .arg(format!(
-                    "Add-AppxPackage -Path '{}'",
-                    installer_path.display()
-                ));
+            cmd.arg("-NoProfile").arg("-Command").arg(format!(
+                "Add-AppxPackage -Path '{}'",
+                installer_path.display()
+            ));
             let status = cmd.status().context("failed to run Add-AppxPackage")?;
             Ok(status.code().unwrap_or(-1))
         }
@@ -4828,7 +5690,10 @@ fn installer_command_arguments(
         resolve_template_switch(
             installer.switches.log.as_deref(),
             default_log_switch(installer_type),
-            request.log_path.as_ref().map(|path| path.display().to_string()),
+            request
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
             "<LOGPATH>",
         ),
     );
@@ -5002,9 +5867,12 @@ fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Resul
                             continue;
                         }
 
-                        if let Some(exit_code) =
-                            try_run_msi_uninstall(installed, &subkey_name, product_code.as_deref(), request)?
-                        {
+                        if let Some(exit_code) = try_run_msi_uninstall(
+                            installed,
+                            &subkey_name,
+                            product_code.as_deref(),
+                            request,
+                        )? {
                             return Ok(Some(exit_code));
                         }
 
@@ -5017,7 +5885,7 @@ fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Resul
                                 .clone()
                                 .or_else(|| subkey.get_value("UninstallString").ok())
                         }
-                            .context("No uninstall command found in registry")?;
+                        .context("No uninstall command found in registry")?;
 
                         let mut cmd = Command::new("cmd");
                         let log_path = request
@@ -5254,6 +6122,13 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
+    fn temp_app_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "pinget-rs-tests-{label}-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    }
+
     #[test]
     fn repository_options_capture_custom_host_settings() {
         let options = RepositoryOptions::new(PathBuf::from(r"C:\temp\pinget-test"))
@@ -5271,6 +6146,9 @@ mod tests {
             kind: SourceKind::PreIndexed,
             arg: "https://example.com/cache".to_string(),
             identifier: "Test.Source".to_string(),
+            trust_level: "None".to_string(),
+            explicit: false,
+            priority: 0,
             last_update: None,
             source_version: None,
         };
@@ -5280,10 +6158,150 @@ mod tests {
             source_state_dir(&app_root, &source),
             app_root.join("sources").join("winget_test")
         );
-        assert_eq!(
-            pins_db_path(&app_root),
-            app_root.join("pins.db")
-        );
+        assert_eq!(pins_db_path(&app_root), app_root.join("pins.db"));
+    }
+
+    #[test]
+    fn source_metadata_and_named_reset_round_trip() {
+        let app_root = temp_app_root("source-reset");
+        let result = (|| -> Result<()> {
+            let mut repository =
+                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            repository.add_source_with_metadata(
+                "test",
+                "https://example.com/test",
+                SourceKind::Rest,
+                Some("trusted"),
+                true,
+                4,
+            )?;
+
+            repository.edit_source("test", Some(false), None)?;
+            let edited = repository
+                .list_sources()
+                .into_iter()
+                .find(|source| source.name == "test")
+                .expect("source");
+            assert_eq!(edited.trust_level, "Trusted");
+            assert!(!edited.explicit);
+            assert_eq!(edited.priority, 4);
+
+            repository.reset_source("test")?;
+            let reset = repository
+                .list_sources()
+                .into_iter()
+                .find(|source| source.name == "test")
+                .expect("source");
+            assert_eq!(reset.trust_level, "Trusted");
+            assert!(!reset.explicit);
+            assert_eq!(reset.priority, 4);
+            assert!(reset.last_update.is_none());
+            assert!(reset.source_version.is_none());
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&app_root);
+        result.expect("source metadata");
+    }
+
+    #[test]
+    fn explicit_sources_are_skipped_by_default_search_resolution() {
+        let app_root = temp_app_root("source-resolution");
+        let result = (|| -> Result<()> {
+            let mut repository =
+                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            repository.add_source_with_metadata(
+                "explicit-test",
+                "https://example.com/explicit",
+                SourceKind::Rest,
+                Some("trusted"),
+                true,
+                10,
+            )?;
+
+            let indexes = repository.resolve_source_indexes(None)?;
+            let names: Vec<_> = indexes
+                .into_iter()
+                .map(|index| repository.list_sources()[index].name.clone())
+                .collect();
+            assert!(!names.iter().any(|name| name == "explicit-test"));
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&app_root);
+        result.expect("source resolution");
+    }
+
+    #[test]
+    fn user_and_admin_settings_round_trip() {
+        let app_root = temp_app_root("settings");
+        let result = (|| -> Result<()> {
+            let repository =
+                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            repository.set_user_settings(
+                &serde_json::json!({
+                    "visual": {
+                        "progressBar": "retro"
+                    }
+                }),
+                false,
+            )?;
+            repository.set_user_settings(
+                &serde_json::json!({
+                    "experimentalFeatures": {
+                        "directMSI": true
+                    }
+                }),
+                true,
+            )?;
+
+            let user_settings = repository.get_user_settings()?;
+            assert_eq!(
+                user_settings["visual"]["progressBar"],
+                serde_json::Value::String("retro".to_string())
+            );
+            assert_eq!(
+                user_settings["experimentalFeatures"]["directMSI"],
+                serde_json::Value::Bool(true)
+            );
+            assert!(repository.test_user_settings(
+                &serde_json::json!({
+                    "experimentalFeatures": {
+                        "directMSI": true
+                    }
+                }),
+                true
+            )?);
+
+            repository.set_admin_setting("LocalManifestFiles", true)?;
+            repository.set_admin_setting("InstallerHashOverride", true)?;
+            let admin_settings = repository.get_admin_settings()?;
+            assert_eq!(
+                admin_settings["LocalManifestFiles"],
+                serde_json::Value::Bool(true)
+            );
+            assert_eq!(
+                admin_settings["InstallerHashOverride"],
+                serde_json::Value::Bool(true)
+            );
+
+            repository.reset_admin_setting(Some("LocalManifestFiles"), false)?;
+            let reset_one = repository.get_admin_settings()?;
+            assert_eq!(
+                reset_one["LocalManifestFiles"],
+                serde_json::Value::Bool(false)
+            );
+
+            repository.reset_admin_setting(None, true)?;
+            let reset_all = repository.get_admin_settings()?;
+            for name in Repository::supported_admin_settings() {
+                assert_eq!(reset_all[*name], serde_json::Value::Bool(false));
+            }
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&app_root);
+        result.expect("settings");
     }
 
     #[test]
@@ -5336,6 +6354,8 @@ mod tests {
                     release_date: None,
                     package_family_name: None,
                     upgrade_code: None,
+                    platforms: Vec::new(),
+                    minimum_os_version: None,
                     switches: InstallerSwitches {
                         silent: Some("/quiet".to_string()),
                         ..InstallerSwitches::default()
@@ -5355,6 +6375,8 @@ mod tests {
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: None,
                 switches: InstallerSwitches {
                     silent: Some("/quiet".to_string()),
                     ..InstallerSwitches::default()
@@ -5460,7 +6482,10 @@ Installers:
         let (_manifest, documents) = parse_yaml_manifest_bundle(yaml.as_bytes()).expect("bundle");
 
         assert_eq!(documents["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(documents["PackageIdentifier"].as_str(), Some("Test.Package"));
+        assert_eq!(
+            documents["PackageIdentifier"].as_str(),
+            Some("Test.Package")
+        );
         assert_eq!(documents["PackageName"].as_str(), Some("Test Package"));
     }
 
@@ -5510,10 +6535,19 @@ Installers:
 
         assert_eq!(documents.len(), 2);
         assert_eq!(documents[0]["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(documents[0]["PackageIdentifier"].as_str(), Some("Test.Package.One"));
-        assert_eq!(documents[0]["PackageName"].as_str(), Some("Test Package One"));
+        assert_eq!(
+            documents[0]["PackageIdentifier"].as_str(),
+            Some("Test.Package.One")
+        );
+        assert_eq!(
+            documents[0]["PackageName"].as_str(),
+            Some("Test Package One")
+        );
         assert_eq!(documents[1]["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(documents[1]["PackageIdentifier"].as_str(), Some("Test.Package.Two"));
+        assert_eq!(
+            documents[1]["PackageIdentifier"].as_str(),
+            Some("Test.Package.Two")
+        );
     }
 
     #[test]
@@ -5528,7 +6562,137 @@ Installers:
         assert!(result.success);
         assert!(result.no_op);
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.warnings, vec![INSTALL_UNSUPPORTED_WARNING.to_string()]);
+        assert_eq!(
+            result.warnings,
+            vec![INSTALL_UNSUPPORTED_WARNING.to_string()]
+        );
+    }
+
+    #[test]
+    fn create_install_no_op_result_honors_no_upgrade() {
+        let mut request = InstallRequest::new(PackageQuery {
+            id: Some("Contoso.App".to_string()),
+            ..PackageQuery::default()
+        });
+        request.no_upgrade = true;
+
+        let manifest = Manifest {
+            id: "Contoso.App".to_string(),
+            name: "Contoso App".to_string(),
+            version: "2.0.0".to_string(),
+            channel: String::new(),
+            publisher: None,
+            description: None,
+            moniker: None,
+            package_url: None,
+            publisher_url: None,
+            publisher_support_url: None,
+            license: None,
+            license_url: None,
+            privacy_url: None,
+            author: None,
+            copyright: None,
+            copyright_url: None,
+            release_notes: None,
+            release_notes_url: None,
+            tags: Vec::new(),
+            agreements: Vec::new(),
+            package_dependencies: Vec::new(),
+            documentation: Vec::new(),
+            installers: Vec::new(),
+        };
+        let existing = ListMatch {
+            name: "Contoso App".to_string(),
+            id: "Contoso.App".to_string(),
+            local_id: "Contoso.App".to_string(),
+            installed_version: "1.0.0".to_string(),
+            available_version: Some("2.0.0".to_string()),
+            source_name: Some("winget".to_string()),
+            publisher: None,
+            scope: None,
+            installer_category: None,
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+
+        let result = Repository::create_install_no_op_result(&request, &manifest, Some(&existing))
+            .expect("no-op result");
+
+        assert!(result.success);
+        assert!(result.no_op);
+        assert_eq!(result.version, "1.0.0");
+        assert_eq!(
+            result.warnings,
+            vec![
+                "Package is already installed; skipping because --no-upgrade was specified."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_install_no_op_result_skips_reinstall_when_current() {
+        let request = InstallRequest::new(PackageQuery {
+            id: Some("Contoso.App".to_string()),
+            ..PackageQuery::default()
+        });
+
+        let manifest = Manifest {
+            id: "Contoso.App".to_string(),
+            name: "Contoso App".to_string(),
+            version: "2.0.0".to_string(),
+            channel: String::new(),
+            publisher: None,
+            description: None,
+            moniker: None,
+            package_url: None,
+            publisher_url: None,
+            publisher_support_url: None,
+            license: None,
+            license_url: None,
+            privacy_url: None,
+            author: None,
+            copyright: None,
+            copyright_url: None,
+            release_notes: None,
+            release_notes_url: None,
+            tags: Vec::new(),
+            agreements: Vec::new(),
+            package_dependencies: Vec::new(),
+            documentation: Vec::new(),
+            installers: Vec::new(),
+        };
+        let existing = ListMatch {
+            name: "Contoso App".to_string(),
+            id: "Contoso.App".to_string(),
+            local_id: "Contoso.App".to_string(),
+            installed_version: "2.0.0".to_string(),
+            available_version: Some("2.0.0".to_string()),
+            source_name: Some("winget".to_string()),
+            publisher: None,
+            scope: None,
+            installer_category: None,
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+
+        let result = Repository::create_install_no_op_result(&request, &manifest, Some(&existing))
+            .expect("no-op result");
+
+        assert!(result.success);
+        assert!(result.no_op);
+        assert_eq!(result.version, "2.0.0");
+        assert_eq!(
+            result.warnings,
+            vec![
+                "Package is already installed and up to date; rerun with --force to reinstall."
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
@@ -5555,7 +6719,10 @@ Installers:
         assert_eq!(document["PackageIdentifier"].as_str(), Some("Test.Package"));
         assert_eq!(document["PackageName"].as_str(), Some("Test Package"));
         assert_eq!(document["InstallerType"].as_str(), Some("exe"));
-        assert_eq!(document["Installers"][0]["Architecture"].as_str(), Some("x64"));
+        assert_eq!(
+            document["Installers"][0]["Architecture"].as_str(),
+            Some("x64")
+        );
     }
 
     #[test]
@@ -5607,6 +6774,49 @@ Installers:
     }
 
     #[test]
+    fn parses_platform_and_minimum_os_version_from_yaml_manifest() {
+        let yaml = r#"
+PackageIdentifier: Test.Package
+PackageVersion: 1.2.3
+PackageName: Test Package
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.19041.0
+Installers:
+  - Architecture: x64
+    InstallerType: exe
+    InstallerUrl: https://example.test/Test.Package.exe
+    InstallerSha256: ABC123
+  - Architecture: x64
+    InstallerType: msix
+    Platform:
+      - Windows.Universal
+    MinimumOSVersion: 10.0.22621.0
+    InstallerUrl: https://example.test/Test.Package.msix
+    InstallerSha256: DEF456
+"#;
+
+        let manifest = parse_yaml_manifest(yaml.as_bytes()).expect("manifest");
+
+        assert_eq!(
+            manifest.installers[0].platforms,
+            vec!["Windows.Desktop".to_string()]
+        );
+        assert_eq!(
+            manifest.installers[0].minimum_os_version.as_deref(),
+            Some("10.0.19041.0")
+        );
+        assert_eq!(
+            manifest.installers[1].platforms,
+            vec!["Windows.Universal".to_string()]
+        );
+        assert_eq!(
+            manifest.installers[1].minimum_os_version.as_deref(),
+            Some("10.0.22621.0")
+        );
+    }
+
+    #[test]
     fn installer_switch_arguments_prefer_manifest_switches() {
         let installer = Installer {
             architecture: None,
@@ -5619,6 +6829,8 @@ Installers:
             release_date: None,
             package_family_name: None,
             upgrade_code: None,
+            platforms: Vec::new(),
+            minimum_os_version: None,
             switches: InstallerSwitches {
                 silent: Some("/mysilent".to_string()),
                 silent_with_progress: Some("/mysilentwithprogress".to_string()),
@@ -5661,15 +6873,33 @@ Installers:
         let mut interactive_request = InstallRequest::new(PackageQuery::default());
         interactive_request.mode = InstallerMode::Interactive;
         assert_eq!(
-            installer_command_arguments("inno", &silent_request, &manifest, Path::new("installer.exe"), &installer),
+            installer_command_arguments(
+                "inno",
+                &silent_request,
+                &manifest,
+                Path::new("installer.exe"),
+                &installer
+            ),
             vec!["/mysilent".to_string()]
         );
         assert_eq!(
-            installer_command_arguments("inno", &progress_request, &manifest, Path::new("installer.exe"), &installer),
+            installer_command_arguments(
+                "inno",
+                &progress_request,
+                &manifest,
+                Path::new("installer.exe"),
+                &installer
+            ),
             vec!["/mysilentwithprogress".to_string()]
         );
         assert_eq!(
-            installer_command_arguments("inno", &interactive_request, &manifest, Path::new("installer.exe"), &installer),
+            installer_command_arguments(
+                "inno",
+                &interactive_request,
+                &manifest,
+                Path::new("installer.exe"),
+                &installer
+            ),
             vec!["/myinteractive".to_string()]
         );
     }
@@ -5687,6 +6917,8 @@ Installers:
             release_date: None,
             package_family_name: None,
             upgrade_code: None,
+            platforms: Vec::new(),
+            minimum_os_version: None,
             switches: InstallerSwitches::default(),
             commands: Vec::new(),
             package_dependencies: Vec::new(),
@@ -5722,7 +6954,13 @@ Installers:
         silent_request.mode = InstallerMode::Silent;
 
         assert_eq!(
-            installer_command_arguments("inno", &progress_request, &manifest, Path::new("installer.exe"), &installer),
+            installer_command_arguments(
+                "inno",
+                &progress_request,
+                &manifest,
+                Path::new("installer.exe"),
+                &installer
+            ),
             vec![
                 "/SP-".to_string(),
                 "/SILENT".to_string(),
@@ -5731,7 +6969,13 @@ Installers:
             ]
         );
         assert_eq!(
-            installer_command_arguments("inno", &silent_request, &manifest, Path::new("installer.exe"), &installer),
+            installer_command_arguments(
+                "inno",
+                &silent_request,
+                &manifest,
+                Path::new("installer.exe"),
+                &installer
+            ),
             vec![
                 "/SP-".to_string(),
                 "/VERYSILENT".to_string(),
@@ -5754,6 +6998,8 @@ Installers:
             release_date: None,
             package_family_name: None,
             upgrade_code: None,
+            platforms: Vec::new(),
+            minimum_os_version: None,
             switches: InstallerSwitches {
                 custom: Some("ADDLOCAL=Core".to_string()),
                 log: Some("/log \"<LOGPATH>\"".to_string()),
@@ -5795,7 +7041,13 @@ Installers:
         request.install_location = Some(r"C:\Apps\ShareX".to_string());
 
         assert_eq!(
-            installer_command_arguments("msi", &request, &manifest, Path::new(r"C:\temp\ShareX.msi"), &installer),
+            installer_command_arguments(
+                "msi",
+                &request,
+                &manifest,
+                Path::new(r"C:\temp\ShareX.msi"),
+                &installer
+            ),
             vec![
                 "/i".to_string(),
                 r"C:\temp\ShareX.msi".to_string(),
@@ -5855,6 +7107,24 @@ Installers:
             compare_version("1.0.0-preview2", "1.0.0-preview1"),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn installer_hash_verification_fails_on_mismatch_without_override() {
+        let result = verify_installer_hash(Some("DEADBEEF"), b"pinget", false);
+        assert!(result.is_err());
+        assert!(
+            result
+                .expect_err("hash mismatch")
+                .to_string()
+                .contains("Installer hash mismatch")
+        );
+    }
+
+    #[test]
+    fn installer_hash_verification_allows_mismatch_with_override() {
+        verify_installer_hash(Some("DEADBEEF"), b"pinget", true).expect("hash override");
+        verify_installer_hash(None, b"pinget", false).expect("missing hash");
     }
 
     #[test]
@@ -5937,6 +7207,8 @@ Installers:
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
@@ -5952,6 +7224,8 @@ Installers:
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: vec!["demo".to_string()],
                 package_dependencies: Vec::new(),
@@ -5984,6 +7258,8 @@ Installers:
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
@@ -5999,14 +7275,113 @@ Installers:
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
         ];
 
-        let selected = select_installer(&installers, &PackageQuery::default()).expect("selected installer");
+        let selected =
+            select_installer(&installers, &PackageQuery::default()).expect("selected installer");
         assert_eq!(selected.scope.as_deref(), Some("machine"));
+    }
+
+    #[test]
+    fn selects_installer_using_requested_platform() {
+        let installers = vec![
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                platforms: vec!["Windows.Universal".to_string()],
+                minimum_os_version: None,
+                switches: InstallerSwitches::default(),
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                platforms: vec!["Windows.Desktop".to_string()],
+                minimum_os_version: None,
+                switches: InstallerSwitches::default(),
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+        ];
+        let query = PackageQuery {
+            installer_type: Some("exe".to_string()),
+            platform: Some("Windows.Desktop".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let selected = select_installer(&installers, &query).expect("selected installer");
+        assert_eq!(selected.platforms, vec!["Windows.Desktop".to_string()]);
+    }
+
+    #[test]
+    fn selects_installer_using_requested_os_version() {
+        let installers = vec![
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: Some("10.0.22621.0".to_string()),
+                switches: InstallerSwitches::default(),
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+            Installer {
+                architecture: Some("x64".to_string()),
+                installer_type: Some("exe".to_string()),
+                url: None,
+                sha256: None,
+                product_code: None,
+                locale: Some("en-US".to_string()),
+                scope: Some("user".to_string()),
+                release_date: None,
+                package_family_name: None,
+                upgrade_code: None,
+                platforms: Vec::new(),
+                minimum_os_version: Some("10.0.19041.0".to_string()),
+                switches: InstallerSwitches::default(),
+                commands: Vec::new(),
+                package_dependencies: Vec::new(),
+            },
+        ];
+        let query = PackageQuery {
+            installer_type: Some("exe".to_string()),
+            os_version: Some("10.0.19045.0".to_string()),
+            ..PackageQuery::default()
+        };
+
+        let selected = select_installer(&installers, &query).expect("selected installer");
+        assert_eq!(selected.minimum_os_version.as_deref(), Some("10.0.19041.0"));
     }
 
     #[test]
@@ -6186,6 +7561,207 @@ Installers:
                 .as_deref(),
             Some("2.0.0")
         );
+    }
+
+    #[test]
+    fn create_repair_list_query_includes_installed_selectors() {
+        let request = RepairRequest {
+            query: PackageQuery {
+                query: Some("powertoys".to_string()),
+                id: Some("Microsoft.PowerToys".to_string()),
+                name: Some("PowerToys".to_string()),
+                moniker: Some("powertoys".to_string()),
+                source: Some("winget".to_string()),
+                exact: true,
+                version: Some("0.98.1".to_string()),
+                install_scope: Some("Machine".to_string()),
+                ..PackageQuery::default()
+            },
+            manifest_path: None,
+            product_code: Some("{GUID}".to_string()),
+            mode: InstallerMode::Silent,
+            log_path: Some(PathBuf::from("repair.log")),
+            accept_package_agreements: true,
+            force: true,
+            ignore_security_hash: true,
+        };
+
+        let query = Repository::create_repair_list_query(&request);
+        assert_eq!(query.query.as_deref(), Some("powertoys"));
+        assert_eq!(query.id.as_deref(), Some("Microsoft.PowerToys"));
+        assert_eq!(query.name.as_deref(), Some("PowerToys"));
+        assert_eq!(query.moniker.as_deref(), Some("powertoys"));
+        assert_eq!(query.product_code.as_deref(), Some("{GUID}"));
+        assert_eq!(query.version.as_deref(), Some("0.98.1"));
+        assert_eq!(query.source.as_deref(), Some("winget"));
+        assert!(query.exact);
+        assert_eq!(query.install_scope.as_deref(), Some("Machine"));
+        assert_eq!(query.count, Some(100));
+    }
+
+    #[test]
+    fn create_repair_install_request_forces_reinstall_of_resolved_installed_package() {
+        let request = RepairRequest {
+            query: PackageQuery {
+                name: Some("PowerToys".to_string()),
+                source: Some("winget".to_string()),
+                locale: Some("en-US".to_string()),
+                installer_architecture: Some("x64".to_string()),
+                install_scope: Some("Machine".to_string()),
+                ..PackageQuery::default()
+            },
+            manifest_path: None,
+            product_code: None,
+            mode: InstallerMode::SilentWithProgress,
+            log_path: Some(PathBuf::from("repair.log")),
+            accept_package_agreements: true,
+            force: false,
+            ignore_security_hash: true,
+        };
+        let installed = ListMatch {
+            name: "PowerToys".to_string(),
+            id: "Microsoft.PowerToys".to_string(),
+            local_id: r"ARP\Machine\X64\Microsoft.PowerToys".to_string(),
+            installed_version: "0.98.1".to_string(),
+            available_version: Some("0.98.2".to_string()),
+            source_name: Some("winget".to_string()),
+            publisher: None,
+            scope: Some("Machine".to_string()),
+            installer_category: Some("exe".to_string()),
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+
+        let install_request = Repository::create_repair_install_request(&request, Some(&installed));
+        assert_eq!(
+            install_request.query.id.as_deref(),
+            Some("Microsoft.PowerToys")
+        );
+        assert!(install_request.query.query.is_none());
+        assert!(install_request.query.name.is_none());
+        assert!(install_request.query.moniker.is_none());
+        assert_eq!(install_request.query.source.as_deref(), Some("winget"));
+        assert_eq!(install_request.query.version.as_deref(), Some("0.98.1"));
+        assert_eq!(install_request.query.locale.as_deref(), Some("en-US"));
+        assert_eq!(
+            install_request.query.installer_architecture.as_deref(),
+            Some("x64")
+        );
+        assert_eq!(
+            install_request.query.install_scope.as_deref(),
+            Some("Machine")
+        );
+        assert!(install_request.query.exact);
+        assert_eq!(install_request.mode, InstallerMode::SilentWithProgress);
+        assert_eq!(install_request.log_path, Some(PathBuf::from("repair.log")));
+        assert!(install_request.accept_package_agreements);
+        assert!(install_request.force);
+        assert!(install_request.ignore_security_hash);
+    }
+
+    #[test]
+    fn source_scoped_pin_operations_round_trip() {
+        let app_root = temp_app_root("pins");
+        let result = (|| -> Result<()> {
+            let repository =
+                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            repository.add_pin("Contoso.Tool", "1.0", "winget", PinType::Pinning)?;
+            repository.add_pin("Contoso.Tool", "*", "test", PinType::Blocking)?;
+            repository.add_pin("Fabrikam.Tool", "*", "", PinType::Pinning)?;
+
+            assert_eq!(repository.list_pins(None)?.len(), 3);
+            assert_eq!(repository.list_pins(Some("winget"))?.len(), 1);
+            assert_eq!(repository.list_pins(Some("test"))?.len(), 1);
+
+            assert!(repository.remove_pin("Contoso.Tool", Some("winget"))?);
+            assert_eq!(repository.list_pins(None)?.len(), 2);
+            assert!(!repository.remove_pin("Contoso.Tool", Some("winget"))?);
+
+            repository.reset_pins(Some("test"))?;
+            let remaining = repository.list_pins(None)?;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].package_id, "Fabrikam.Tool");
+
+            repository.reset_pins(None)?;
+            assert!(repository.list_pins(None)?.is_empty());
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&app_root);
+        result.expect("pin round trip");
+    }
+
+    #[test]
+    fn version_pin_patterns_match_exact_and_prefix_values() {
+        assert!(version_matches_pin_pattern("1.2.3", "*"));
+        assert!(version_matches_pin_pattern("1.2.3", "1.2.3"));
+        assert!(version_matches_pin_pattern("1.2.3", "1.2.*"));
+        assert!(!version_matches_pin_pattern("1.3.0", "1.2.*"));
+        assert!(!version_matches_pin_pattern("1.2.3", "2.0.0"));
+    }
+
+    #[test]
+    fn source_specific_pins_override_source_agnostic_pins() {
+        let item = ListMatch {
+            name: "Contoso Tool".to_string(),
+            id: "Contoso.Tool".to_string(),
+            local_id: r"ARP\User\X64\Contoso.Tool".to_string(),
+            installed_version: "1.0.0".to_string(),
+            available_version: Some("2.0.0".to_string()),
+            source_name: Some("winget".to_string()),
+            publisher: None,
+            scope: None,
+            installer_category: None,
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+        let pins = vec![
+            PinRecord {
+                package_id: "Contoso.Tool".to_string(),
+                version: "*".to_string(),
+                source_id: String::new(),
+                pin_type: PinType::Blocking,
+            },
+            PinRecord {
+                package_id: "Contoso.Tool".to_string(),
+                version: "2.0.*".to_string(),
+                source_id: "winget".to_string(),
+                pin_type: PinType::Pinning,
+            },
+        ];
+
+        assert!(!is_upgrade_blocked_by_pin(&item, &pins));
+    }
+
+    #[test]
+    fn blocking_pin_blocks_upgrade() {
+        let item = ListMatch {
+            name: "Contoso Tool".to_string(),
+            id: "Contoso.Tool".to_string(),
+            local_id: r"ARP\User\X64\Contoso.Tool".to_string(),
+            installed_version: "1.0.0".to_string(),
+            available_version: Some("2.0.0".to_string()),
+            source_name: Some("winget".to_string()),
+            publisher: None,
+            scope: None,
+            installer_category: None,
+            install_location: None,
+            package_family_names: Vec::new(),
+            product_codes: Vec::new(),
+            upgrade_codes: Vec::new(),
+        };
+        let pins = vec![PinRecord {
+            package_id: "Contoso.Tool".to_string(),
+            version: "*".to_string(),
+            source_id: "winget".to_string(),
+            pin_type: PinType::Blocking,
+        }];
+
+        assert!(is_upgrade_blocked_by_pin(&item, &pins));
     }
 
     #[cfg(windows)]
@@ -6409,10 +7985,7 @@ Installers:
     #[test]
     #[cfg(windows)]
     fn arp_subkey_name_extracts_registry_subkey() {
-        assert_eq!(
-            Some("ShareX"),
-            arp_subkey_name(r"ARP\Machine\X64\ShareX")
-        );
+        assert_eq!(Some("ShareX"), arp_subkey_name(r"ARP\Machine\X64\ShareX"));
         assert_eq!(None, arp_subkey_name(r"MSIX\ShareX_19.0.2_x64__name"));
     }
 
@@ -6436,10 +8009,7 @@ Installers:
         };
 
         assert!(registry_entry_matches_installed_package(
-            "ShareX",
-            "ShareX",
-            None,
-            &installed
+            "ShareX", "ShareX", None, &installed
         ));
         assert!(!registry_entry_matches_installed_package(
             "ShareX.ShareX",
@@ -6454,11 +8024,7 @@ Installers:
     fn build_uninstall_command_only_appends_silent_flag_when_needed() {
         assert_eq!(
             r#""C:\Program Files\ShareX\unins000.exe" /S"#,
-            build_uninstall_command(
-                r#""C:\Program Files\ShareX\unins000.exe""#,
-                true,
-                false
-            )
+            build_uninstall_command(r#""C:\Program Files\ShareX\unins000.exe""#, true, false)
         );
         assert_eq!(
             r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#,
@@ -6470,11 +8036,7 @@ Installers:
         );
         assert_eq!(
             r#""C:\Program Files\ShareX\unins000.exe""#,
-            build_uninstall_command(
-                r#""C:\Program Files\ShareX\unins000.exe""#,
-                false,
-                false
-            )
+            build_uninstall_command(r#""C:\Program Files\ShareX\unins000.exe""#, false, false)
         );
     }
 }
