@@ -1,27 +1,19 @@
-# Pinget ports
+# Pinget
 
-This directory contains Devolutions **Pinget** ports: non-native, portable WinGet-compatible implementations that reuse WinGet-style source, manifest, cache, and package-selection logic without using the WinGet COM API.
+This directory contains **Pinget**: portable, COM-free WinGet-compatible implementations intended to become a standalone repository later.
+
+The current goal is to keep the subtree self-contained enough that it can be split out with minimal rewriting. Within this directory, treat paths as if `pinget\` were the repository root.
 
 ## Layout
 
 | Path | Language | Output | Notes |
 | --- | --- | --- | --- |
-| `ports\rust` | Rust | `pinget` CLI + `pinget-core` library | Cargo workspace with a reusable core crate and a CLI crate |
-| `ports\dotnet` | C# / .NET 10 | `pinget` CLI + `Pinget.Core` library + Pinget PowerShell module | Solution with a reusable core library, CLI app, tests, and a PowerShell engine/cmdlet layer |
-
-## C# assembly and namespace structure
-
-| Project | Assembly | Primary namespace | Role |
-| --- | --- | --- | --- |
-| `ports\dotnet\src\WinGetCore\WinGetCore.csproj` | `Pinget.Core.dll` | `Pinget.Core` | Core library |
-| `ports\dotnet\src\WinGetCli\WinGetCli.csproj` | `pinget.dll` | `Pinget.Cli` (top-level statements in `Program.cs`) | CLI front end |
-| `ports\dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj` | `Pinget.Core.Tests.dll` | `Pinget.Core.Tests` | Tests |
-| `ports\dotnet\src\Pinget.PowerShell.Engine\Pinget.PowerShell.Engine.csproj` | `Pinget.PowerShell.Engine.dll` | `Pinget.PowerShell.Engine` | PowerShell engine layer over `Pinget.Core` |
-| `ports\dotnet\src\Pinget.PowerShell.Cmdlets\Pinget.PowerShell.Cmdlets.csproj` | `Pinget.PowerShell.Cmdlets.dll` | `Pinget.PowerShell.Cmdlets` | Renamed PowerShell cmdlet surface |
+| `rust` | Rust | `pinget` CLI + `pinget-core` library | Cargo workspace with a reusable core crate and a CLI crate |
+| `dotnet` | C# / .NET 10 | `pinget` CLI + `Pinget.Core` library + Pinget PowerShell module | Solution with a reusable core library, CLI app, tests, and a PowerShell engine/cmdlet layer |
 
 ## Current scope
 
-Both CLI ports currently support a substantial WinGet-like subset, including:
+Both implementations currently cover a substantial WinGet-like subset:
 
 - `search`, `show`, `list`, `upgrade`
 - `source list`, `source update`, `source export`, `source add`, `source edit`, `source remove`, `source reset`
@@ -35,11 +27,21 @@ Structured manifest output is also supported:
 - `show --output json|yaml`
 - `search --manifests --output json|yaml`
 
-The C# port also ships a **Pinget PowerShell module** that mirrors the upstream `Microsoft.WinGet.Client` cmdlet family with renamed `Pinget` nouns, backed entirely by `Pinget.Core` rather than COM/WinRT APIs.
+The C# implementation also ships a **Pinget PowerShell module** that mirrors the upstream `Microsoft.WinGet.Client` cmdlet family with renamed `Pinget` nouns, backed entirely by `Pinget.Core` rather than COM / WinRT APIs.
+
+## Non-goals
+
+Pinget intentionally excludes:
+
+- COM / WinRT / `Microsoft.Management.Deployment`
+- DSC-backed configuration flows (`configure`, `dscv3`, `Microsoft.WinGet.Configuration`)
+- `mcp`
+
+When upstream behavior fundamentally depends on those components, Pinget prefers explicit limits over fake-success shims.
 
 ## Portability model
 
-These ports are designed to keep **source-backed functionality** working cross-platform where practical.
+Pinget is designed to keep **source-backed functionality** working cross-platform where practical.
 
 - Commands like `search`, `show`, `cache warm`, `download`, `source`, and manifest shaping are intended to work on Windows and Linux.
 - On Linux, **installed-state and package-action behavior is best-effort**:
@@ -48,81 +50,92 @@ These ports are designed to keep **source-backed functionality** working cross-p
 
 ## Custom REST sources
 
-Both ports support custom REST sources, including third-party services such as `winget.pro`.
-
-The CLI accepts both:
-
-1. The earlier positional form:
+Both implementations support custom REST sources, including third-party services such as `winget.pro`.
 
 ```powershell
 pinget source add winget.pro https://api.example.test/feed --type Microsoft.Rest
-```
-
-2. The upstream-style option form:
-
-```powershell
 pinget source add -n winget.pro -a https://api.example.test/feed -t Microsoft.Rest --trust-level trusted
 ```
 
 Notes:
 
-- `Microsoft.Rest` maps to the existing REST source kind in both ports.
+- `Microsoft.Rest` maps to the existing REST source kind in both implementations.
 - `Microsoft.PreIndexed.Package` maps to the preindexed source kind.
-- In both ports, `--trust-level`, `--explicit`, and source priority metadata are now persisted as source metadata and influence source selection behavior.
+- `--trust-level`, `--explicit`, and source priority metadata are persisted as source metadata and influence source selection behavior.
 
 ## Build and test
+
+From the parent `winget-cli` repository root:
+
+```powershell
+Set-Location .\pinget
+```
 
 ### Rust
 
 ```powershell
-cargo test -p pinget-core --manifest-path ports\rust\Cargo.toml
-cargo build -p pinget-cli --release --manifest-path ports\rust\Cargo.toml
+cargo +nightly fmt --manifest-path rust\Cargo.toml --all
+cargo clippy -q --manifest-path rust\Cargo.toml --workspace --tests -- -D warnings
+cargo test -p pinget-core --manifest-path rust\Cargo.toml
+cargo test -p pinget-cli --manifest-path rust\Cargo.toml
+cargo build -p pinget-cli --manifest-path rust\Cargo.toml
 ```
 
 Run:
 
 ```powershell
-cargo run -p pinget-cli --manifest-path ports\rust\Cargo.toml -- search WinMerge
+cargo run -p pinget-cli --manifest-path rust\Cargo.toml -- search WinMerge
 ```
 
 ### C#
 
 ```powershell
-dotnet test ports\dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj -c Release
-dotnet build ports\dotnet\src\WinGetCli\WinGetCli.csproj -c Release
-pwsh -NoLogo -NoProfile -File (Resolve-Path 'ports\dotnet\tests\RunTests.ps1')
+dotnet format dotnet\WinGetDotNet.slnx
+dotnet build dotnet\WinGetDotNet.slnx -c Release
+dotnet test dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj -c Release
+pwsh -NoLogo -NoProfile -File (Resolve-Path 'dotnet\tests\RunTests.ps1')
 ```
 
 Run:
 
 ```powershell
-dotnet run --project ports\dotnet\src\WinGetCli\WinGetCli.csproj -- search WinMerge
+dotnet run --project dotnet\src\WinGetCli\WinGetCli.csproj -- search WinMerge
 ```
 
 ## Repository structure
 
 ### Rust
 
-- `ports\rust\crates\winget-core` - `pinget-core` library source
-- `ports\rust\crates\winget-cli` - `pinget` CLI wrapper
+- `rust\crates\winget-core` - `pinget-core` library source
+- `rust\crates\winget-cli` - `pinget` CLI wrapper
+- `rust\tools` - parity and comparison helpers
 
 ### C#
 
-- `ports\dotnet\src\WinGetCore` - `Pinget.Core` library
-- `ports\dotnet\src\WinGetCli` - `Pinget.Cli` wrapper
-- `ports\dotnet\src\WinGetCore.Tests` - tests
-- `ports\dotnet\src\Pinget.PowerShell.Engine` - PowerShell engine over the C# core
-- `ports\dotnet\src\Pinget.PowerShell.Cmdlets` - PowerShell cmdlet implementation
-- `ports\dotnet\tests` - Pinget PowerShell Pester coverage
+- `dotnet\src\WinGetCore` - `Pinget.Core` library
+- `dotnet\src\WinGetCli` - `Pinget.Cli` wrapper
+- `dotnet\src\WinGetCore.Tests` - unit tests
+- `dotnet\src\Pinget.PowerShell.Engine` - PowerShell engine over the C# core
+- `dotnet\src\Pinget.PowerShell.Cmdlets` - PowerShell cmdlet implementation
+- `dotnet\tests` - Pinget PowerShell Pester coverage
+
+## Extraction prep
+
+This subtree is being prepared for later promotion into its own GitHub repository. Current prep rules:
+
+1. Prefer subtree-relative paths in docs and scripts.
+2. Keep Pinget-specific documentation under this directory instead of the parent repo when practical.
+3. Avoid introducing dependencies on the native WinGet COM stack, DSC/configuration stack, or MCP.
+4. Keep Rust and C# toolchain instructions runnable from this directory as a future repository root.
 
 ## Status
 
-These ports are best treated as **experimental Pinget / portable winget implementations** focused on:
+Pinget is best treated as an **experimental portable winget implementation** focused on:
 
 - source-backed package discovery
 - manifest retrieval and shaping
 - custom REST source support
 - reusable library surfaces in Rust and C#
-- a COM-free PowerShell automation surface over the C# port
+- a COM-free PowerShell automation surface over the C# implementation
 
-They intentionally exclude COM/WinRT APIs, DSC/configuration flows (`configure`, `dscv3`, `Microsoft.WinGet.Configuration`), and `mcp`, so they are not intended to be drop-in, fully complete replacements for the native Windows Package Manager client.
+It is not intended to be a drop-in, fully complete replacement for the native Windows Package Manager client.
