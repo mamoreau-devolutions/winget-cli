@@ -30,14 +30,7 @@ public sealed class AddSourceCmdlet : PSCmdlet
 
     protected override void ProcessRecord()
     {
-        if (TrustLevel != PSSourceTrustLevel.Default)
-            WriteWarning("TrustLevel is accepted for compatibility but is not implemented by Pinget sources.");
-        if (Explicit)
-            WriteWarning("Explicit source registration is accepted for compatibility but is not implemented by Pinget sources.");
-        if (Priority != 0)
-            WriteWarning("Source priority is accepted for compatibility but is not implemented by Pinget sources.");
-
         using var client = PingetClient.Open();
-        client.AddSource(Name, Argument, Type);
+        client.AddSource(Name, Argument, Type, TrustLevel, Explicit, Priority);
     }
 }

@@ -17,6 +17,7 @@ internal record SourceStore
                 Kind = SourceKind.PreIndexed,
                 Arg = "https://cdn.winget.microsoft.com/cache",
                 Identifier = "Microsoft.Winget.Source_8wekyb3d8bbwe",
+                TrustLevel = "Trusted",
             },
             new SourceRecord
             {
@@ -24,6 +25,7 @@ internal record SourceStore
                 Kind = SourceKind.Rest,
                 Arg = "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
                 Identifier = "StoreEdgeFD",
+                TrustLevel = "Trusted",
             }
         ]
     };

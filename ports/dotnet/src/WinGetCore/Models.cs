@@ -22,6 +22,9 @@ public record SourceRecord
     public required SourceKind Kind { get; init; }
     public required string Arg { get; init; }
     public required string Identifier { get; init; }
+    public string TrustLevel { get; set; } = "None";
+    public bool Explicit { get; set; }
+    public int Priority { get; set; }
     public DateTime? LastUpdate { get; set; }
     public string? SourceVersion { get; set; }
 }

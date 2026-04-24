@@ -55,6 +55,10 @@
         'tpgus'
         'udpgp'
         'uspgp'
+        'Get-PingetSettings'
+        'Get-PingetUserSettings'
+        'Set-PingetUserSettings'
+        'Test-PingetUserSettings'
     )
 
     FormatsToProcess = @('Format.ps1xml')

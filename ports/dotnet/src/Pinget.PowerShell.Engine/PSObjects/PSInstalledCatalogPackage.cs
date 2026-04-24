@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace Pinget.PowerShell.Engine.PSObjects;
 
 public sealed class PSInstalledCatalogPackage : PSCatalogPackage
@@ -10,22 +12,47 @@ public sealed class PSInstalledCatalogPackage : PSCatalogPackage
         string installedVersion,
         IReadOnlyList<string> availableVersions,
         string? publisher,
-        string? scope)
-        : base(id, name, source, moniker)
+        string? scope,
+        IReadOnlyList<string>? packageFamilyNames = null,
+        IReadOnlyList<string>? productCodes = null)
+        : base(id, name, source, moniker, CreatePackageVersions(id, name, publisher, availableVersions, packageFamilyNames, productCodes))
     {
         InstalledVersion = installedVersion;
-        AvailableVersions = availableVersions;
         Publisher = publisher;
         Scope = scope;
+        PackageFamilyNames = packageFamilyNames ?? [];
+        ProductCodes = productCodes ?? [];
     }
 
     public string InstalledVersion { get; }
 
-    public IReadOnlyList<string> AvailableVersions { get; }
-
-    public bool IsUpdateAvailable => AvailableVersions.Count > 0;
-
     public string? Publisher { get; }
 
     public string? Scope { get; }
+
+    public IReadOnlyList<string> PackageFamilyNames { get; }
+
+    public IReadOnlyList<string> ProductCodes { get; }
+
+    public PSCompareResult CompareToVersion(string version) => PSPackageVersionInfo.CompareVersionStrings(InstalledVersion, version);
+
+    private static IReadOnlyList<PSPackageVersionInfo> CreatePackageVersions(
+        string id,
+        string name,
+        string? publisher,
+        IReadOnlyList<string> availableVersions,
+        IReadOnlyList<string>? packageFamilyNames,
+        IReadOnlyList<string>? productCodes)
+    {
+        return availableVersions
+            .Select(version => new PSPackageVersionInfo(
+                version,
+                id,
+                name,
+                publisher,
+                null,
+                packageFamilyNames ?? [],
+                productCodes ?? []))
+            .ToList();
+    }
 }

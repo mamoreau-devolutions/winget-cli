@@ -37,6 +37,9 @@ public sealed class PingetClient : IDisposable
             sources = sources
                 .Where(source => string.Equals(source.Name, name, StringComparison.OrdinalIgnoreCase))
                 .ToList();
+
+            if (sources.Count == 0)
+                throw new InvalidOperationException($"Source '{name}' not found.");
         }
 
         return new CollectionResult<PSSourceResult>(
@@ -50,6 +53,9 @@ public sealed class PingetClient : IDisposable
                     SourceKind.PreIndexed => "Microsoft.PreIndexed.Package",
                     _ => source.Kind.ToString(),
                 },
+                TrustLevel = string.IsNullOrWhiteSpace(source.TrustLevel) ? "None" : source.TrustLevel,
+                Explicit = source.Explicit,
+                Priority = source.Priority,
                 Identifier = source.Identifier,
                 LastUpdate = source.LastUpdate,
                 SourceVersion = source.SourceVersion,
@@ -57,9 +63,15 @@ public sealed class PingetClient : IDisposable
             []);
     }
 
-    public void AddSource(string name, string argument, string? type)
+    public void AddSource(string name, string argument, string? type, PSSourceTrustLevel trustLevel, bool explicitSource, int priority)
     {
-        _repository.AddSource(name, argument, ParseSourceKind(type));
+        _repository.AddSource(
+            name,
+            argument,
+            ParseSourceKind(type),
+            trustLevel == PSSourceTrustLevel.Default ? "None" : trustLevel.ToString(),
+            explicitSource,
+            priority);
     }
 
     public void RemoveSource(string name) => _repository.RemoveSource(name);
@@ -183,6 +195,8 @@ public sealed class PingetClient : IDisposable
                 Id = manifest.Id,
                 Name = manifest.Name,
                 Source = request.Query.Source ?? inputObject?.Source ?? string.Empty,
+                CorrelationData = installerPath,
+                Status = "Ok",
                 Version = manifest.Version,
                 DownloadDirectory = outputDirectory,
                 DownloadedInstallerPath = installerPath,

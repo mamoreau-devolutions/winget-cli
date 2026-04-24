@@ -45,7 +45,7 @@ public class Repository : IDisposable
 
     public List<SourceRecord> ListSources() => _store.Sources.ToList();
 
-    public void AddSource(string name, string arg, SourceKind kind)
+    public void AddSource(string name, string arg, SourceKind kind, string trustLevel = "None", bool explicitSource = false, int priority = 0)
     {
         if (_store.Sources.Any(s => s.Name == name))
             throw new InvalidOperationException($"A source with name '{name}' already exists.");
@@ -58,6 +58,9 @@ public class Repository : IDisposable
             Kind = kind,
             Arg = arg,
             Identifier = name,
+            TrustLevel = trustLevel,
+            Explicit = explicitSource,
+            Priority = priority,
         });
         SourceStoreManager.Save(_store, _appRoot);
     }
@@ -572,7 +575,7 @@ public class Repository : IDisposable
     private (List<LocatedMatch> Matches, List<string> Warnings, bool Truncated) SearchLocated(
         PackageQuery query, SearchSemantics semantics)
     {
-        var indexes = ResolveSourceIndexes(query.Source);
+        var indexes = ResolveSearchSourceIndexes(query.Source);
         var matches = new List<LocatedMatch>();
         var warnings = new List<string>();
         bool truncated = false;
@@ -1518,6 +1521,20 @@ public class Repository : IDisposable
         Count = 500, Exact = query.Exact,
         Version = null,
     };
+
+    private List<int> ResolveSearchSourceIndexes(string? sourceName)
+    {
+        if (sourceName is not null)
+            return ResolveSourceIndexes(sourceName);
+
+        return _store.Sources
+            .Select((source, index) => new { source, index })
+            .Where(entry => !entry.source.Explicit)
+            .OrderByDescending(entry => entry.source.Priority)
+            .ThenBy(entry => entry.index)
+            .Select(entry => entry.index)
+            .ToList();
+    }
 
     private List<int> ResolveSourceIndexes(string? sourceName)
     {

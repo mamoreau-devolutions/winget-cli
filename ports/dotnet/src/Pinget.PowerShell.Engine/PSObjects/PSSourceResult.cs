@@ -8,6 +8,12 @@ public sealed class PSSourceResult
 
     public required string Type { get; init; }
 
+    public string TrustLevel { get; init; } = "None";
+
+    public bool Explicit { get; init; }
+
+    public int Priority { get; init; }
+
     public required string Identifier { get; init; }
 
     public DateTime? LastUpdate { get; init; }
