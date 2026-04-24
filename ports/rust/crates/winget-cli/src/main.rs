@@ -1,16 +1,19 @@
+#![allow(clippy::print_stdout)]
+
+use std::fmt;
+use std::io::{self, Write};
+use std::path::PathBuf;
+
 use anyhow::{Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use pinget_core::{
-    CacheWarmResult, Documentation, InstallRequest, InstallResult, InstallerMode, ListMatch,
-    ListQuery, ListResponse, PackageQuery, PinRecord, PinType, RepairRequest, Repository,
-    SearchMatch, SearchResponse, ShowResult, SourceKind, SourceRecord, SourceUpdateResult,
-    UninstallRequest, VersionsResult,
+    CacheWarmResult, Documentation, InstallRequest, InstallResult, InstallerMode, ListMatch, ListQuery, ListResponse,
+    PackageQuery, PinRecord, PinType, RepairRequest, Repository, SearchMatch, SearchResponse, ShowResult, SourceKind,
+    SourceRecord, SourceUpdateResult, UninstallRequest, VersionsResult,
 };
-use std::path::PathBuf;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const UPGRADE_UNSUPPORTED_WARNING: &str =
-    "Upgrading packages is not supported on this platform; no changes were made.";
+const UPGRADE_UNSUPPORTED_WARNING: &str = "Upgrading packages is not supported on this platform; no changes were made.";
 
 #[derive(Parser)]
 #[command(name = "pinget", about = "Pinget: portable winget in pure Rust", version = VERSION)]
@@ -134,12 +137,7 @@ struct ShowArgs {
 struct UpgradeArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(
-        long = "query",
-        short = 'q',
-        value_name = "QUERY",
-        conflicts_with = "query"
-    )]
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -261,12 +259,7 @@ struct SourceEditArgs {
 struct PinQueryArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(
-        long = "query",
-        short = 'q',
-        value_name = "QUERY",
-        conflicts_with = "query"
-    )]
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -432,12 +425,7 @@ struct ImportArgs {
 struct QueryArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(
-        long = "query",
-        short = 'q',
-        value_name = "QUERY",
-        conflicts_with = "query"
-    )]
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -471,12 +459,7 @@ struct QueryArgs {
 struct SearchArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(
-        long = "query",
-        short = 'q',
-        value_name = "QUERY",
-        conflicts_with = "query"
-    )]
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -504,12 +487,7 @@ struct SearchArgs {
 struct ListArgs {
     #[arg(conflicts_with = "query_option")]
     query: Option<String>,
-    #[arg(
-        long = "query",
-        short = 'q',
-        value_name = "QUERY",
-        conflicts_with = "query"
-    )]
+    #[arg(long = "query", short = 'q', value_name = "QUERY", conflicts_with = "query")]
     query_option: Option<String>,
     #[arg(long)]
     id: Option<String>,
@@ -541,7 +519,7 @@ struct ListArgs {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error:#}");
+        write_stderr_line(format_args!("error: {error:#}"));
         std::process::exit(1);
     }
 }
@@ -568,7 +546,7 @@ fn run() -> Result<()> {
             let mut repository = Repository::open()?;
             let details = args.details;
             let upgrade = args.upgrade;
-            let result = repository.list(&args.clone().into())?;
+            let result = repository.list(&args.into())?;
             if output.is_text() {
                 print_list_result(result, details, upgrade);
             } else {
@@ -603,7 +581,7 @@ fn run() -> Result<()> {
                 let result = repository.search_manifests(&args.into())?;
                 print_serialized(&result, output)?;
             } else if args.versions {
-                let result = repository.search_versions(&args.clone().into())?;
+                let result = repository.search_versions(&args.into())?;
                 if output.is_text() {
                     print_versions(result);
                 } else {
@@ -620,21 +598,19 @@ fn run() -> Result<()> {
         }
         Commands::Upgrade(args) => {
             let mut repository = Repository::open()?;
-            let args = args.clone();
             let do_install = args.all
                 || args.query.is_some()
                 || args.query_option.is_some()
                 || args.id.is_some()
                 || args.name.is_some();
             if do_install && !cfg!(windows) {
-                print_warnings(&[UPGRADE_UNSUPPORTED_WARNING.to_string()]);
+                print_warnings(&[UPGRADE_UNSUPPORTED_WARNING.to_owned()]);
                 println!("No changes were made.");
                 return Ok(());
             }
 
             let mut list_query = ListQuery::from(args.clone());
-            list_query.include_pinned =
-                list_query.include_pinned || has_explicit_upgrade_selector(&args);
+            list_query.include_pinned = list_query.include_pinned || has_explicit_upgrade_selector(&args);
             let result = repository.list(&list_query)?;
             let mode = if args.silent {
                 InstallerMode::Silent
@@ -708,13 +684,13 @@ fn run() -> Result<()> {
                                 println!("  Successfully upgraded {}", m.id);
                             }
                             Ok(r) => {
-                                eprintln!(
+                                write_stderr_line(format_args!(
                                     "  Failed to upgrade {} (exit code: {})",
                                     m.id, r.exit_code
-                                );
+                                ));
                             }
                             Err(e) => {
-                                eprintln!("  Error upgrading {}: {e}", m.id);
+                                write_stderr_line(format_args!("  Error upgrading {}: {e}", m.id));
                             }
                         }
                     }
@@ -729,18 +705,10 @@ fn run() -> Result<()> {
                 SourceCommands::Update { source } => {
                     print_source_updates(repository.update_sources(source.as_deref())?)
                 }
-                SourceCommands::Export => print_source_export(&repository),
+                SourceCommands::Export => print_source_export(&repository)?,
                 SourceCommands::Add(args) => {
-                    let name = resolve_source_add_value(
-                        args.name.as_deref(),
-                        args.name_option.as_deref(),
-                        "name",
-                    )?;
-                    let arg = resolve_source_add_value(
-                        args.arg.as_deref(),
-                        args.arg_option.as_deref(),
-                        "argument",
-                    )?;
+                    let name = resolve_source_add_value(args.name.as_deref(), args.name_option.as_deref(), "name")?;
+                    let arg = resolve_source_add_value(args.arg.as_deref(), args.arg_option.as_deref(), "argument")?;
                     let kind = parse_source_kind(&args.kind)?;
                     repository.add_source_with_metadata(
                         &name,
@@ -842,10 +810,7 @@ fn run() -> Result<()> {
                             if args.all {
                                 println!("Reset all admin settings.");
                             } else {
-                                println!(
-                                    "Reset admin setting '{}'.",
-                                    args.setting.as_deref().unwrap_or_default()
-                                );
+                                println!("Reset admin setting '{}'.", args.setting.as_deref().unwrap_or_default());
                             }
                         } else {
                             print_json_value(&repository.get_admin_settings()?, output)?;
@@ -865,11 +830,7 @@ fn run() -> Result<()> {
             let mut request = InstallRequest::new(args.query.into());
             request.manifest_path = args.manifest;
             request.ignore_security_hash = args.ignore_security_hash;
-            do_download(
-                &mut repository,
-                &request,
-                args.download_directory.as_deref(),
-            )?;
+            do_download(&mut repository, &request, args.download_directory.as_deref())?;
         }
         Commands::Pin { command } => {
             let mut repository = Repository::open()?;
@@ -882,10 +843,7 @@ fn run() -> Result<()> {
                     } else if pins.is_empty() {
                         println!("No pins found.");
                     } else {
-                        println!(
-                            "{:<40} {:<20} {:<15} {}",
-                            "Package Id", "Version", "Source", "Pin Type"
-                        );
+                        println!("{:<40} {:<20} {:<15} Pin Type", "Package Id", "Version", "Source");
                         println!("{}", "-".repeat(85));
                         for pin in &pins {
                             println!(
@@ -919,9 +877,7 @@ fn run() -> Result<()> {
                         .any(|pin| pin.package_id.eq_ignore_ascii_case(&package_id))
                         && !args.force
                     {
-                        bail!(
-                            "A pin for the selected package already exists. Rerun with --force to replace it."
-                        );
+                        bail!("A pin for the selected package already exists. Rerun with --force to replace it.");
                     }
 
                     let pin_type = if args.blocking {
@@ -929,17 +885,14 @@ fn run() -> Result<()> {
                     } else {
                         PinType::Pinning
                     };
-                    let pin_version = if let Some(version) = args
-                        .version
-                        .as_deref()
-                        .filter(|value| !value.trim().is_empty())
-                    {
-                        version.to_string()
-                    } else if args.blocking {
-                        "*".to_string()
-                    } else {
-                        resolved_version.unwrap_or_else(|| "*".to_string())
-                    };
+                    let pin_version =
+                        if let Some(version) = args.version.as_deref().filter(|value| !value.trim().is_empty()) {
+                            version.to_owned()
+                        } else if args.blocking {
+                            "*".to_owned()
+                        } else {
+                            resolved_version.unwrap_or_else(|| "*".to_owned())
+                        };
 
                     repository.add_pin(&package_id, &pin_version, &source_id, pin_type)?;
                     println!("Pin added for {package_id}");
@@ -1240,10 +1193,7 @@ fn print_search(result: SearchResponse) {
         .iter()
         .any(|item| item.match_criteria.as_deref().is_some());
     if show_match_column {
-        println!(
-            "{:<32} {:<40} {:<18} {:<24} Source",
-            "Name", "Id", "Version", "Match"
-        );
+        println!("{:<32} {:<40} {:<18} {:<24} Source", "Name", "Id", "Version", "Match");
         for item in result.matches {
             println!(
                 "{:<32} {:<40} {:<18} {:<24} {}",
@@ -1328,11 +1278,9 @@ fn print_list_result(result: ListResponse, details: bool, upgrade_only: bool) {
             }
         }
     } else {
-        let show_available = matches.iter().any(|item| {
-            item.available_version
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
-        });
+        let show_available = matches
+            .iter()
+            .any(|item| item.available_version.as_deref().is_some_and(|value| !value.is_empty()));
         if show_available {
             let rows = matches
                 .into_iter()
@@ -1374,10 +1322,7 @@ fn print_list_result(result: ListResponse, details: bool, upgrade_only: bool) {
 fn print_versions(result: VersionsResult) {
     print_warnings(&result.warnings);
     println!("Found {} [{}]", result.package.name, result.package.id);
-    let show_channel = result
-        .versions
-        .iter()
-        .any(|version| !version.channel.is_empty());
+    let show_channel = result.versions.iter().any(|version| !version.channel.is_empty());
     if show_channel {
         println!("{:<20} Channel", "Version");
         for version in result.versions {
@@ -1442,10 +1387,7 @@ fn print_show(result: ShowResult) {
         print_field("Release Notes Url", value);
     }
     if !result.manifest.package_dependencies.is_empty() {
-        print_field(
-            "Dependencies",
-            &result.manifest.package_dependencies.join(", "),
-        );
+        print_field("Dependencies", &result.manifest.package_dependencies.join(", "));
     }
     print_documentation(&result.manifest.documentation);
     if !result.manifest.tags.is_empty() {
@@ -1515,8 +1457,13 @@ fn print_cache_warm(result: CacheWarmResult) {
 
 fn print_warnings(warnings: &[String]) {
     for warning in warnings {
-        eprintln!("warning: {warning}");
+        write_stderr_line(format_args!("warning: {warning}"));
     }
+}
+
+fn write_stderr_line(args: fmt::Arguments<'_>) {
+    let mut stderr = io::stderr().lock();
+    if writeln!(stderr, "{args}").is_err() {}
 }
 
 fn print_field(label: &str, value: &str) {
@@ -1564,7 +1511,7 @@ fn print_info() {
     {
         use std::env;
         let os_version = get_os_version();
-        let arch = env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| "Unknown".to_string());
+        let arch = env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| "Unknown".to_owned());
         println!("Windows: Windows.Desktop v{os_version}");
         println!("System Architecture: {arch}");
         println!();
@@ -1586,26 +1533,20 @@ fn print_info() {
 
         println!("{:<40} {}", "Source Cache", source_cache);
         println!("{:<40} {}", "User Settings", settings_path);
+        println!("{:<40} {}", "Portable Links Directory (User)", portable_links_user);
         println!(
-            "{:<40} {}",
-            "Portable Links Directory (User)", portable_links_user
-        );
-        println!(
-            "{:<40} {}",
-            "Portable Links Directory (Machine)", "C:\\Program Files\\WinGet\\Links"
+            "{:<40} C:\\Program Files\\WinGet\\Links",
+            "Portable Links Directory (Machine)"
         );
         println!(
             "{:<40} {}",
             "Portable Package Root (User)",
-            format!("{}\\Microsoft\\WinGet\\Packages", local_app_data)
+            format_args!("{local_app_data}\\Microsoft\\WinGet\\Packages")
         );
+        println!("{:<40} C:\\Program Files\\WinGet\\Packages", "Portable Package Root");
         println!(
-            "{:<40} {}",
-            "Portable Package Root", "C:\\Program Files\\WinGet\\Packages"
-        );
-        println!(
-            "{:<40} {}",
-            "Portable Package Root (x86)", "C:\\Program Files (x86)\\WinGet\\Packages"
+            "{:<40} C:\\Program Files (x86)\\WinGet\\Packages",
+            "Portable Package Root (x86)"
         );
         println!("{:<40} {}", "Installer Downloads", downloads);
     }
@@ -1618,15 +1559,9 @@ fn print_info() {
     println!();
     println!("Links");
     println!("{}", "-".repeat(80));
-    println!("{:<20} {}", "Homepage", "https://aka.ms/winget");
-    println!(
-        "{:<20} {}",
-        "Privacy Statement", "https://aka.ms/winget-privacy"
-    );
-    println!(
-        "{:<20} {}",
-        "License Agreement", "https://aka.ms/winget-license"
-    );
+    println!("{:<20} https://aka.ms/winget", "Homepage");
+    println!("{:<20} https://aka.ms/winget-privacy", "Privacy Statement");
+    println!("{:<20} https://aka.ms/winget-license", "License Agreement");
 }
 
 #[cfg(windows)]
@@ -1641,20 +1576,17 @@ fn get_os_version() -> String {
         let minor: u32 = key.get_value("CurrentMinorVersionNumber").unwrap_or(0);
         format!("{major}.{minor}.{build}.{ubr}")
     } else {
-        "Unknown".to_string()
+        "Unknown".to_owned()
     }
 }
 
 fn print_hash(file_path: &str, _msix: bool) -> Result<()> {
-    use sha2::{Digest, Sha256};
     use std::fs;
-    let data = fs::read(file_path)
-        .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", file_path, e))?;
+
+    use sha2::{Digest, Sha256};
+    let data = fs::read(file_path).map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", file_path, e))?;
     let hash = Sha256::digest(&data);
-    let hex = hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hex = hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     println!("SHA256: {hex}");
     Ok(())
 }
@@ -1729,7 +1661,7 @@ fn print_error_lookup(input: &str) {
         input
             .parse::<u32>()
             .ok()
-            .or_else(|| input.parse::<i32>().ok().map(|v| v as u32))
+            .or_else(|| input.parse::<i32>().ok().and_then(|value| u32::try_from(value).ok()))
     };
 
     let code = match code {
@@ -1762,10 +1694,7 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
         0x80004003 => Some(("E_POINTER", "Invalid pointer")),
         0x80004004 => Some(("E_ABORT", "Operation aborted")),
         0x80004005 => Some(("E_FAIL", "Unspecified error")),
-        0x80070002 => Some((
-            "E_FILENOTFOUND",
-            "The system cannot find the file specified",
-        )),
+        0x80070002 => Some(("E_FILENOTFOUND", "The system cannot find the file specified")),
         0x80070005 => Some(("E_ACCESSDENIED", "General access denied error")),
         0x80070057 => Some(("E_INVALIDARG", "One or more arguments are invalid")),
         0x8007000E => Some(("E_OUTOFMEMORY", "Ran out of memory")),
@@ -1776,10 +1705,7 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
             "Invalid command line arguments",
         )),
         0x8A150003 => Some(("APPINSTALLER_CLI_ERROR_COMMAND_FAILED", "Command failed")),
-        0x8A150004 => Some((
-            "APPINSTALLER_CLI_ERROR_MANIFEST_FAILED",
-            "Opening manifest failed",
-        )),
+        0x8A150004 => Some(("APPINSTALLER_CLI_ERROR_MANIFEST_FAILED", "Opening manifest failed")),
         0x8A150005 => Some((
             "APPINSTALLER_CLI_ERROR_BLOCKED_BY_POLICY",
             "Operation is blocked by policy",
@@ -1792,10 +1718,7 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
             "APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION",
             "Unsupported manifest version",
         )),
-        0x8A150008 => Some((
-            "APPINSTALLER_CLI_ERROR_DOWNLOAD_FAILED",
-            "Download of installer failed",
-        )),
+        0x8A150008 => Some(("APPINSTALLER_CLI_ERROR_DOWNLOAD_FAILED", "Download of installer failed")),
         0x8A150009 => Some((
             "APPINSTALLER_CLI_ERROR_CANNOT_WRITE_TO_UPLEVEL_INDEX",
             "Cannot write to the package index",
@@ -1804,26 +1727,14 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
             "APPINSTALLER_CLI_ERROR_INDEX_INTEGRITY_COMPROMISED",
             "Index integrity compromised",
         )),
-        0x8A15000B => Some((
-            "APPINSTALLER_CLI_ERROR_SOURCES_INVALID",
-            "Sources are invalid",
-        )),
+        0x8A15000B => Some(("APPINSTALLER_CLI_ERROR_SOURCES_INVALID", "Sources are invalid")),
         0x8A15000C => Some((
             "APPINSTALLER_CLI_ERROR_SOURCE_NAME_ALREADY_EXISTS",
             "Source name already exists",
         )),
-        0x8A15000D => Some((
-            "APPINSTALLER_CLI_ERROR_INVALID_SOURCE_TYPE",
-            "Invalid source type",
-        )),
-        0x8A15000E => Some((
-            "APPINSTALLER_CLI_ERROR_PACKAGE_IS_BUNDLE",
-            "Package is a bundle",
-        )),
-        0x8A15000F => Some((
-            "APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING",
-            "Source data is missing",
-        )),
+        0x8A15000D => Some(("APPINSTALLER_CLI_ERROR_INVALID_SOURCE_TYPE", "Invalid source type")),
+        0x8A15000E => Some(("APPINSTALLER_CLI_ERROR_PACKAGE_IS_BUNDLE", "Package is a bundle")),
+        0x8A15000F => Some(("APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING", "Source data is missing")),
         0x8A150010 => Some((
             "APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER",
             "None of the installers are applicable for the current system",
@@ -1840,14 +1751,8 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
             "APPINSTALLER_CLI_ERROR_SOURCE_ARG_ALREADY_EXISTS",
             "Source argument already exists",
         )),
-        0x8A150014 => Some((
-            "APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND",
-            "No applications found",
-        )),
-        0x8A150015 => Some((
-            "APPINSTALLER_CLI_ERROR_NO_SOURCES_DEFINED",
-            "No sources defined",
-        )),
+        0x8A150014 => Some(("APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND", "No applications found")),
+        0x8A150015 => Some(("APPINSTALLER_CLI_ERROR_NO_SOURCES_DEFINED", "No sources defined")),
         0x8A150016 => Some((
             "APPINSTALLER_CLI_ERROR_MULTIPLE_APPLICATIONS_FOUND",
             "Multiple applications found",
@@ -1856,10 +1761,7 @@ fn lookup_hresult(code: u32) -> Option<(&'static str, &'static str)> {
             "APPINSTALLER_CLI_ERROR_NO_MANIFEST_FOUND",
             "No manifest found matching input criteria",
         )),
-        0x8A150019 => Some((
-            "APPINSTALLER_CLI_ERROR_NO_RANGES_PROCESSED",
-            "No ranges processed",
-        )),
+        0x8A150019 => Some(("APPINSTALLER_CLI_ERROR_NO_RANGES_PROCESSED", "No ranges processed")),
         0x8A15001A => Some((
             "APPINSTALLER_CLI_ERROR_EXPERIMENTAL_FEATURE_DISABLED",
             "This feature is disabled by Group Policy",
@@ -1929,10 +1831,7 @@ fn print_features() {
         .and_then(|settings| settings.get("experimentalFeatures").cloned())
         .unwrap_or(serde_json::Value::Null);
 
-    println!(
-        "{:<40} {:<10} {:<30} {}",
-        "Feature", "Status", "Property", "Link"
-    );
+    println!("{:<40} {:<10} {:<30} Link", "Feature", "Status", "Property");
     println!("{}", "-".repeat(100));
     for (display_name, property, link) in features {
         let enabled = experimental_features
@@ -1944,7 +1843,7 @@ fn print_features() {
     }
 }
 
-fn print_source_export(repository: &Repository) {
+fn print_source_export(repository: &Repository) -> Result<()> {
     let sources = repository.list_sources();
     let source_array: Vec<serde_json::Value> = sources
         .iter()
@@ -1964,7 +1863,7 @@ fn print_source_export(repository: &Repository) {
     let export = serde_json::json!({
         "Sources": source_array,
     });
-    println!("{}", serde_json::to_string_pretty(&export).unwrap());
+    print_serialized(&export, OutputFormat::Json)
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
@@ -1972,10 +1871,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         return;
     }
 
-    let mut widths = headers
-        .iter()
-        .map(|header| display_width(header))
-        .collect::<Vec<_>>();
+    let mut widths = headers.iter().map(|header| display_width(header)).collect::<Vec<_>>();
     let mut has_data = vec![false; headers.len()];
 
     for row in rows {
@@ -2028,10 +1924,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         total_required = console_width.saturating_sub(1);
     }
 
-    let header_row = headers
-        .iter()
-        .map(|header| header.to_string())
-        .collect::<Vec<_>>();
+    let header_row = headers.iter().map(|header| header.to_string()).collect::<Vec<_>>();
     print_table_line(&header_row, &widths, &space_after);
     println!("{}", "-".repeat(total_required));
     for row in rows {
@@ -2084,19 +1977,19 @@ fn display_width(value: &str) -> usize {
 #[cfg(windows)]
 fn get_console_width_impl() -> usize {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
 
-    unsafe {
-        let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        if let Some(width) = try_console_width(stdout_handle) {
-            return width;
-        }
+    // SAFETY: `GetStdHandle` is a leaf Win32 call that does not require Rust-side invariants.
+    let stdout_handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    if let Some(width) = try_console_width(stdout_handle) {
+        return width;
+    }
 
-        let mut conout = "CONOUT$\0".encode_utf16().collect::<Vec<_>>();
-        let console_handle = CreateFileW(
+    let mut conout = "CONOUT$\0".encode_utf16().collect::<Vec<_>>();
+    // SAFETY: the encoded `CONOUT$` buffer is NUL-terminated and all pointer arguments follow the Win32 contract.
+    let console_handle = unsafe {
+        CreateFileW(
             conout.as_mut_ptr(),
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -2104,30 +1997,34 @@ fn get_console_width_impl() -> usize {
             OPEN_EXISTING,
             0,
             std::ptr::null_mut(),
-        );
-        if console_handle.is_null() || console_handle == INVALID_HANDLE_VALUE {
-            return 119;
-        }
-
-        let width = try_console_width(console_handle).unwrap_or(119);
-        CloseHandle(console_handle);
-        width
+        )
+    };
+    if console_handle.is_null() || console_handle == INVALID_HANDLE_VALUE {
+        return 119;
     }
+
+    let width = try_console_width(console_handle).unwrap_or(119);
+    // SAFETY: `console_handle` was returned by `CreateFileW` above and is closed exactly once here.
+    unsafe {
+        CloseHandle(console_handle);
+    }
+    width
 }
 
 #[cfg(windows)]
-unsafe fn try_console_width(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<usize> {
+fn try_console_width(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<usize> {
     use std::mem::zeroed;
+
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Console::{
-        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
-    };
+    use windows_sys::Win32::System::Console::{CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo};
 
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
         return None;
     }
 
+    // SAFETY: zero-initializing this plain old data Win32 struct is valid before the API fills it in.
     let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { zeroed() };
+    // SAFETY: `handle` is checked above, and `info` points to initialized writable storage for the API result.
     if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
         return None;
     }
@@ -2145,13 +2042,10 @@ fn get_console_width_impl() -> usize {
 
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
-        return value.to_string();
+        return value.to_owned();
     }
 
-    let mut output = value
-        .chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>();
+    let mut output = value.chars().take(width.saturating_sub(1)).collect::<String>();
     output.push('.');
     output
 }
@@ -2164,14 +2058,11 @@ fn print_validate(manifest_path: &str, ignore_warnings: bool) -> Result<()> {
         bail!("Path does not exist: {manifest_path}");
     }
 
-    let files: Vec<std::path::PathBuf> = if path.is_dir() {
+    let files: Vec<PathBuf> = if path.is_dir() {
         std::fs::read_dir(path)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| {
-                p.extension()
-                    .is_some_and(|ext| ext == "yaml" || ext == "yml")
-            })
+            .filter(|p| p.extension().is_some_and(|ext| ext == "yaml" || ext == "yml"))
             .collect()
     } else {
         vec![path.to_path_buf()]
@@ -2225,12 +2116,7 @@ fn print_validate(manifest_path: &str, ignore_warnings: bool) -> Result<()> {
 
                 let result = validator.validate(&yaml_value);
                 if let Err(error) = result {
-                    let msg = format!(
-                        "  {}: {} (at {})",
-                        file.display(),
-                        error,
-                        error.instance_path
-                    );
+                    let msg = format!("  {}: {} (at {})", file.display(), error, error.instance_path);
                     all_errors.push(msg);
                 }
             } else {
@@ -2249,21 +2135,13 @@ fn print_validate(manifest_path: &str, ignore_warnings: bool) -> Result<()> {
         }
 
         // Basic field checks
-        if manifest_type == "singleton" || manifest_type == "installer" {
-            if yaml_value.get("Installers").is_none() {
-                all_errors.push(format!(
-                    "  {}: required field 'Installers' is missing",
-                    file.display()
-                ));
-            }
+        if (manifest_type == "singleton" || manifest_type == "installer") && yaml_value.get("Installers").is_none() {
+            all_errors.push(format!("  {}: required field 'Installers' is missing", file.display()));
         }
         if manifest_type == "singleton" || manifest_type == "defaultlocale" {
             for field in ["PackageIdentifier", "PackageVersion"] {
                 if yaml_value.get(field).is_none() && manifest_version != "0.1.0" {
-                    all_errors.push(format!(
-                        "  {}: required field '{field}' is missing",
-                        file.display()
-                    ));
+                    all_errors.push(format!("  {}: required field '{field}' is missing", file.display()));
                 }
             }
         }
@@ -2291,7 +2169,7 @@ fn print_validate(manifest_path: &str, ignore_warnings: bool) -> Result<()> {
     Ok(())
 }
 
-fn find_schema_dir() -> Option<std::path::PathBuf> {
+fn find_schema_dir() -> Option<PathBuf> {
     // Try relative to the current exe first, then walk up looking for schemas/JSON/manifests
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
@@ -2327,21 +2205,17 @@ fn map_manifest_version(version: &str) -> String {
     // Map version strings to schema directory names
     // "1.6.0" -> "v1.6.0", "0.1.0" -> "preview", "latest" -> "latest"
     if version == "0.1.0" {
-        "preview".to_string()
+        "preview".to_owned()
     } else if version.starts_with("1.") {
         format!("v{version}")
     } else {
-        "latest".to_string()
+        "latest".to_owned()
     }
 }
 
-fn do_download(
-    repository: &mut Repository,
-    request: &InstallRequest,
-    download_dir: Option<&str>,
-) -> Result<()> {
+fn do_download(repository: &mut Repository, request: &InstallRequest, download_dir: Option<&str>) -> Result<()> {
     let dir = match download_dir {
-        Some(d) => std::path::PathBuf::from(d),
+        Some(d) => PathBuf::from(d),
         None => std::env::current_dir()?,
     };
 
@@ -2371,7 +2245,7 @@ fn print_install_result(result: &InstallResult) {
             target
         );
     } else {
-        eprintln!(
+        write_stderr_line(format_args!(
             "Failed to {} {} (exit code: {})",
             if result.installer_type == "uninstall" {
                 "uninstall"
@@ -2380,7 +2254,7 @@ fn print_install_result(result: &InstallResult) {
             },
             target,
             result.exit_code
-        );
+        ));
         std::process::exit(result.exit_code);
     }
 }
@@ -2397,25 +2271,21 @@ fn print_package_action_result(result: &InstallResult, success_verb: &str, failu
     } else if result.success {
         println!("Successfully {success_verb} {target}");
     } else {
-        eprintln!(
+        write_stderr_line(format_args!(
             "Failed to {failure_verb} {target} (exit code: {})",
             result.exit_code
-        );
+        ));
         std::process::exit(result.exit_code);
     }
 }
 
-fn resolve_source_add_value(
-    positional: Option<&str>,
-    option: Option<&str>,
-    label: &str,
-) -> Result<String> {
+fn resolve_source_add_value(positional: Option<&str>, option: Option<&str>, label: &str) -> Result<String> {
     match (positional, option) {
         (Some(positional), Some(option)) if positional != option => {
             bail!("conflicting source {label} values were provided")
         }
-        (_, Some(option)) => Ok(option.to_string()),
-        (Some(positional), _) => Ok(positional.to_string()),
+        (_, Some(option)) => Ok(option.to_owned()),
+        (Some(positional), _) => Ok(positional.to_owned()),
         (None, None) => bail!("source add requires a {label}"),
     }
 }
@@ -2423,9 +2293,7 @@ fn resolve_source_add_value(
 fn parse_source_kind(value: &str) -> Result<SourceKind> {
     if value.eq_ignore_ascii_case("rest") || value.eq_ignore_ascii_case("Microsoft.Rest") {
         Ok(SourceKind::Rest)
-    } else if value.eq_ignore_ascii_case("preindexed")
-        || value.eq_ignore_ascii_case("Microsoft.PreIndexed.Package")
-    {
+    } else if value.eq_ignore_ascii_case("preindexed") || value.eq_ignore_ascii_case("Microsoft.PreIndexed.Package") {
         Ok(SourceKind::PreIndexed)
     } else {
         bail!("unsupported source type: {value}")
@@ -2453,10 +2321,7 @@ fn ensure_pin_query_provided(query: &PackageQuery, command_name: &str) -> Result
     Ok(())
 }
 
-fn resolve_single_available_pin_target(
-    repository: &mut Repository,
-    query: &PackageQuery,
-) -> Result<SearchMatch> {
+fn resolve_single_available_pin_target(repository: &mut Repository, query: &PackageQuery) -> Result<SearchMatch> {
     let result = repository.search(query)?;
     match result.matches.len() {
         0 => bail!("No package matched the query."),
@@ -2465,10 +2330,7 @@ fn resolve_single_available_pin_target(
     }
 }
 
-fn resolve_single_installed_pin_target(
-    repository: &mut Repository,
-    query: &PackageQuery,
-) -> Result<ListMatch> {
+fn resolve_single_installed_pin_target(repository: &mut Repository, query: &PackageQuery) -> Result<ListMatch> {
     let result = repository.list(&ListQuery {
         query: query.query.clone(),
         id: query.id.clone(),
@@ -2533,9 +2395,7 @@ fn find_matching_pin<'a>(item: &ListMatch, pins: &'a [PinRecord]) -> Option<&'a 
     let mut source_agnostic = None;
 
     for pin in pins {
-        if !pin.package_id.eq_ignore_ascii_case(&item.id)
-            && !pin.package_id.eq_ignore_ascii_case(&item.local_id)
-        {
+        if !pin.package_id.eq_ignore_ascii_case(&item.id) && !pin.package_id.eq_ignore_ascii_case(&item.local_id) {
             continue;
         }
 
@@ -2568,9 +2428,7 @@ fn matches_text(value: &str, query: &str, exact: bool) -> bool {
     if exact {
         value.eq_ignore_ascii_case(query)
     } else {
-        value
-            .to_ascii_lowercase()
-            .contains(&query.to_ascii_lowercase())
+        value.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
     }
 }
 
@@ -2627,10 +2485,7 @@ fn do_import(
             .clone();
 
         for package in &packages {
-            let id = package
-                .get("PackageIdentifier")
-                .and_then(|i| i.as_str())
-                .unwrap_or("?");
+            let id = package.get("PackageIdentifier").and_then(|i| i.as_str()).unwrap_or("?");
             let version = if ignore_versions {
                 None
             } else {
@@ -2638,14 +2493,14 @@ fn do_import(
                     .get("Version")
                     .or_else(|| package.get("PackageVersion"))
                     .and_then(|value| value.as_str())
-                    .map(|value| value.to_string())
+                    .map(|value| value.to_owned())
             };
             total += 1;
 
             let query = PackageQuery {
-                id: Some(id.to_string()),
+                id: Some(id.to_owned()),
                 version,
-                source: Some(source_name.to_string()),
+                source: Some(source_name.to_owned()),
                 exact: true,
                 ..Default::default()
             };
@@ -2678,12 +2533,9 @@ fn do_import(
                             }
                             Ok(r) if r.success => println!("    OK"),
                             Ok(r) => println!("    FAILED (exit {})", r.exit_code),
-                            Err(e)
-                                if ignore_unavailable
-                                    && can_ignore_unavailable_import_failure(&e) =>
-                            {
+                            Err(e) if ignore_unavailable && can_ignore_unavailable_import_failure(&e) => {
                                 println!("    UNAVAILABLE");
-                                eprintln!("warning: Skipping unavailable package '{id}': {e}");
+                                write_stderr_line(format_args!("warning: Skipping unavailable package '{id}': {e}"));
                                 skipped += 1;
                             }
                             Err(e) => println!("    ERROR: {e}"),
@@ -2738,10 +2590,7 @@ mod tests {
 
     #[test]
     fn parse_source_kind_accepts_winget_rest_type_name() {
-        assert_eq!(
-            parse_source_kind("Microsoft.Rest").expect("kind"),
-            SourceKind::Rest
-        );
+        assert_eq!(parse_source_kind("Microsoft.Rest").expect("kind"), SourceKind::Rest);
         assert_eq!(
             parse_source_kind("Microsoft.PreIndexed.Package").expect("kind"),
             SourceKind::PreIndexed

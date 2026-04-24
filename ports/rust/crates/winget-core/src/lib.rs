@@ -1,21 +1,19 @@
-use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Duration, Utc};
-use reqwest::blocking::{Client, Response};
-use rusqlite::{
-    Connection, OpenFlags, Row as SqlRow, params_from_iter,
-    types::{Value as SqlValue, ValueRef},
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue};
-use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{Cursor, Read};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Duration, Utc};
+use reqwest::blocking::{Client, Response};
+use rusqlite::types::{Value as SqlValue, ValueRef};
+use rusqlite::{Connection, OpenFlags, Row as SqlRow, params_from_iter};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use winreg::{RegKey, enums::*};
 use zip::ZipArchive;
@@ -25,11 +23,11 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
 const DEFAULT_USER_AGENT: &str = "pinget-rs/0.1";
-const INSTALLED_STATE_UNSUPPORTED_WARNING: &str = "Installed package discovery is not supported on this platform; returning no installed packages.";
+const INSTALLED_STATE_UNSUPPORTED_WARNING: &str =
+    "Installed package discovery is not supported on this platform; returning no installed packages.";
 const INSTALL_UNSUPPORTED_WARNING: &str =
     "Installing packages is not supported on this platform; no changes were made.";
-const REPAIR_UNSUPPORTED_WARNING: &str =
-    "Repairing packages is not supported on this platform; no changes were made.";
+const REPAIR_UNSUPPORTED_WARNING: &str = "Repairing packages is not supported on this platform; no changes were made.";
 const REPAIR_REINSTALL_WARNING: &str =
     "Pinget repair currently re-runs the package install flow for the selected package.";
 const UNINSTALL_UNSUPPORTED_WARNING: &str =
@@ -90,22 +88,22 @@ impl Default for SourceStore {
         Self {
             sources: vec![
                 SourceRecord {
-                    name: "winget".to_string(),
+                    name: "winget".to_owned(),
                     kind: SourceKind::PreIndexed,
-                    arg: "https://cdn.winget.microsoft.com/cache".to_string(),
-                    identifier: "Microsoft.Winget.Source_8wekyb3d8bbwe".to_string(),
-                    trust_level: "Trusted".to_string(),
+                    arg: "https://cdn.winget.microsoft.com/cache".to_owned(),
+                    identifier: "Microsoft.Winget.Source_8wekyb3d8bbwe".to_owned(),
+                    trust_level: "Trusted".to_owned(),
                     explicit: false,
                     priority: 0,
                     last_update: None,
                     source_version: None,
                 },
                 SourceRecord {
-                    name: "msstore".to_string(),
+                    name: "msstore".to_owned(),
                     kind: SourceKind::Rest,
-                    arg: "https://storeedgefd.dsx.mp.microsoft.com/v9.0".to_string(),
-                    identifier: "StoreEdgeFD".to_string(),
-                    trust_level: "Trusted".to_string(),
+                    arg: "https://storeedgefd.dsx.mp.microsoft.com/v9.0".to_owned(),
+                    identifier: "StoreEdgeFD".to_owned(),
+                    trust_level: "Trusted".to_owned(),
                     explicit: false,
                     priority: 0,
                     last_update: None,
@@ -128,7 +126,7 @@ impl RepositoryOptions {
     pub fn new(app_root: impl Into<PathBuf>) -> Self {
         Self {
             app_root: app_root.into(),
-            user_agent: DEFAULT_USER_AGENT.to_string(),
+            user_agent: DEFAULT_USER_AGENT.to_owned(),
         }
     }
 
@@ -138,6 +136,7 @@ impl RepositoryOptions {
     }
 
     /// Overrides the HTTP user-agent sent to source endpoints.
+    #[must_use]
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = user_agent.into();
         self
@@ -461,7 +460,7 @@ pub enum PinType {
     Gating,
 }
 
-impl std::fmt::Display for PinType {
+impl Display for PinType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             PinType::Pinning => f.write_str("Pinning"),
@@ -492,10 +491,7 @@ impl InstallerSwitches {
                 .silent_with_progress
                 .clone()
                 .or_else(|| fallback.silent_with_progress.clone()),
-            interactive: self
-                .interactive
-                .clone()
-                .or_else(|| fallback.interactive.clone()),
+            interactive: self.interactive.clone().or_else(|| fallback.interactive.clone()),
             custom: self.custom.clone().or_else(|| fallback.custom.clone()),
             log: self.log.clone().or_else(|| fallback.log.clone()),
             install_location: self
@@ -528,7 +524,7 @@ fn unsupported_action_result(
         exit_code: 0,
         success: true,
         no_op: true,
-        warnings: vec![warning.to_string()],
+        warnings: vec![warning.to_owned()],
     }
 }
 
@@ -667,22 +663,17 @@ impl Repository {
         explicit: bool,
         priority: i32,
     ) -> Result<()> {
-        if self
-            .store
-            .sources
-            .iter()
-            .any(|s| s.name.eq_ignore_ascii_case(name))
-        {
+        if self.store.sources.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
             bail!("A source with name '{name}' already exists.");
         }
         if self.store.sources.iter().any(|s| s.arg == arg) {
             bail!("A source with argument '{arg}' already exists.");
         }
-        let identifier = name.to_string();
+        let identifier = name.to_owned();
         self.store.sources.push(SourceRecord {
-            name: name.to_string(),
+            name: name.to_owned(),
             kind,
-            arg: arg.to_string(),
+            arg: arg.to_owned(),
             identifier,
             trust_level: normalize_source_trust_level(trust_level)?,
             explicit,
@@ -694,12 +685,7 @@ impl Repository {
         Ok(())
     }
 
-    pub fn edit_source(
-        &mut self,
-        name: &str,
-        explicit: Option<bool>,
-        trust_level: Option<&str>,
-    ) -> Result<()> {
+    pub fn edit_source(&mut self, name: &str, explicit: Option<bool>, trust_level: Option<&str>) -> Result<()> {
         let source = self
             .store
             .sources
@@ -795,10 +781,7 @@ impl Repository {
         };
 
         let effective = if merge {
-            merge_json_objects(
-                &load_json_object(&user_settings_path(&self.app_root))?,
-                &update,
-            )
+            merge_json_objects(&load_json_object(&user_settings_path(&self.app_root))?, &update)
         } else {
             update
         };
@@ -818,9 +801,7 @@ impl Repository {
     pub fn get_admin_settings(&self) -> Result<JsonValue> {
         let mut settings = load_json_object(&admin_settings_path(&self.app_root))?;
         for name in SUPPORTED_ADMIN_SETTINGS {
-            settings
-                .entry((*name).to_string())
-                .or_insert(JsonValue::Bool(false));
+            settings.entry((*name).to_owned()).or_insert(JsonValue::Bool(false));
         }
 
         Ok(JsonValue::Object(settings))
@@ -832,7 +813,7 @@ impl Repository {
             JsonValue::Object(settings) => settings,
             _ => JsonMap::new(),
         };
-        settings.insert(normalized.to_string(), JsonValue::Bool(enabled));
+        settings.insert(normalized.to_owned(), JsonValue::Bool(enabled));
         save_json_object(admin_settings_path(&self.app_root), &settings)
     }
 
@@ -848,11 +829,11 @@ impl Repository {
 
         if reset_all {
             for setting_name in SUPPORTED_ADMIN_SETTINGS {
-                settings.insert((*setting_name).to_string(), JsonValue::Bool(false));
+                settings.insert((*setting_name).to_owned(), JsonValue::Bool(false));
             }
         } else {
             settings.insert(
-                normalize_admin_setting_name(name.expect("checked above"))?.to_string(),
+                normalize_admin_setting_name(name.expect("checked above"))?.to_owned(),
                 JsonValue::Bool(false),
             );
         }
@@ -870,7 +851,7 @@ impl Repository {
         if !admin_settings.exists() {
             let mut values = JsonMap::new();
             for name in SUPPORTED_ADMIN_SETTINGS {
-                values.insert((*name).to_string(), JsonValue::Bool(false));
+                values.insert((*name).to_owned(), JsonValue::Bool(false));
             }
             save_json_object(admin_settings, &values)?;
         }
@@ -939,23 +920,19 @@ impl Repository {
 
         let mut warnings = Vec::new();
         if !installed_package_discovery_supported() {
-            warnings.push(INSTALLED_STATE_UNSUPPORTED_WARNING.to_string());
+            warnings.push(INSTALLED_STATE_UNSUPPORTED_WARNING.to_owned());
         }
         let mut installed = collect_installed_packages(query.install_scope.as_deref())?;
 
         if needs_available && has_filter {
             // Filtered lookup: search sources with the user's query
             let available_query = package_query_from_list_query(query);
-            let (matches, source_warnings, _) =
-                self.search_located(&available_query, SearchSemantics::Many)?;
+            let (matches, source_warnings, _) = self.search_located(&available_query, SearchSemantics::Many)?;
             warnings.extend(source_warnings);
             let candidates: Vec<SearchMatch> = matches.into_iter().map(|c| c.display).collect();
             for package in &mut installed {
-                package.correlated = correlate_installed_package(
-                    package,
-                    &candidates,
-                    allow_loose_list_correlation(query),
-                );
+                package.correlated =
+                    correlate_installed_package(package, &candidates, allow_loose_list_correlation(query));
             }
         } else if needs_available {
             // Unfiltered upgrade: look up each installed package by its correlation names
@@ -966,19 +943,14 @@ impl Repository {
             .into_iter()
             .filter(|package| {
                 list_package_matches(package, query)
-                    && (!query.upgrade_only
-                        || installed_package_matches_upgrade_filter(package, query))
+                    && (!query.upgrade_only || installed_package_matches_upgrade_filter(package, query))
             })
             .collect::<Vec<_>>();
 
         matches.sort_by(|left, right| {
             list_sort_weight(left)
                 .cmp(&list_sort_weight(right))
-                .then_with(|| {
-                    left.name
-                        .to_ascii_lowercase()
-                        .cmp(&right.name.to_ascii_lowercase())
-                })
+                .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
                 .then_with(|| left.local_id.cmp(&right.local_id))
         });
 
@@ -990,11 +962,7 @@ impl Repository {
         let mut list_matches = matches
             .into_iter()
             .map(list_match_from_installed)
-            .filter(|item| {
-                !query.upgrade_only
-                    || query.include_pinned
-                    || !is_upgrade_blocked_by_pin(item, &pins)
-            })
+            .filter(|item| !query.upgrade_only || query.include_pinned || !is_upgrade_blocked_by_pin(item, &pins))
             .collect::<Vec<_>>();
         let truncated = if let Some(limit) = query.count {
             let was_truncated = list_matches.len() > limit;
@@ -1013,10 +981,7 @@ impl Repository {
 
     /// For unfiltered upgrade/list, search the entire available index and correlate
     /// against all installed packages.
-    fn correlate_all_installed(
-        &mut self,
-        installed: &mut [InstalledPackage],
-    ) -> Result<Vec<String>> {
+    fn correlate_all_installed(&mut self, installed: &mut [InstalledPackage]) -> Result<Vec<String>> {
         let all_query = PackageQuery {
             query: None,
             id: None,
@@ -1047,8 +1012,7 @@ impl Repository {
     }
 
     pub fn search_versions(&mut self, query: &PackageQuery) -> Result<VersionsResult> {
-        let (located, warnings) =
-            self.find_single_match_with_semantics(query, SearchSemantics::Many)?;
+        let (located, warnings) = self.find_single_match_with_semantics(query, SearchSemantics::Many)?;
         let versions = self.versions_for_match(&located, query)?;
         Ok(VersionsResult {
             package: located.display,
@@ -1069,8 +1033,7 @@ impl Repository {
 
     pub fn show(&mut self, query: &PackageQuery) -> Result<ShowResult> {
         let (located, warnings) = self.find_single_match(query)?;
-        let (manifest, manifest_documents, cached_files) =
-            self.manifest_for_match(&located, query)?;
+        let (manifest, manifest_documents, cached_files) = self.manifest_for_match(&located, query)?;
         let selected_installer = select_installer(&manifest.installers, query);
 
         Ok(ShowResult {
@@ -1144,13 +1107,7 @@ impl Repository {
         Ok(rows)
     }
 
-    pub fn add_pin(
-        &self,
-        package_id: &str,
-        version: &str,
-        source_id: &str,
-        pin_type: PinType,
-    ) -> Result<()> {
+    pub fn add_pin(&self, package_id: &str, version: &str, source_id: &str, pin_type: PinType) -> Result<()> {
         let db_path = pins_db_path(&self.app_root);
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(
@@ -1186,10 +1143,7 @@ impl Repository {
                 rusqlite::params![package_id, source_id],
             )?
         } else {
-            conn.execute(
-                "DELETE FROM pin WHERE package_id = ?1",
-                rusqlite::params![package_id],
-            )?
+            conn.execute("DELETE FROM pin WHERE package_id = ?1", rusqlite::params![package_id])?
         };
         Ok(count > 0)
     }
@@ -1202,10 +1156,7 @@ impl Repository {
 
         if let Some(source_id) = source_id {
             let conn = Connection::open(&db_path)?;
-            conn.execute(
-                "DELETE FROM pin WHERE source_id = ?1",
-                rusqlite::params![source_id],
-            )?;
+            conn.execute("DELETE FROM pin WHERE source_id = ?1", rusqlite::params![source_id])?;
         } else {
             fs::remove_file(&db_path)?;
         }
@@ -1222,11 +1173,7 @@ impl Repository {
 
     // ── Install / download ──
 
-    pub fn download_installer(
-        &mut self,
-        query: &PackageQuery,
-        download_dir: &Path,
-    ) -> Result<(Manifest, PathBuf)> {
+    pub fn download_installer(&mut self, query: &PackageQuery, download_dir: &Path) -> Result<(Manifest, PathBuf)> {
         self.download_installer_for_request(&InstallRequest::new(query.clone()), download_dir)
     }
 
@@ -1254,22 +1201,14 @@ impl Repository {
         });
         let dest = download_dir.join(filename);
 
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .context("failed to download installer")?;
+        let response = self.client.get(url).send().context("failed to download installer")?;
         if !response.status().is_success() {
             bail!("Download failed: HTTP {}", response.status());
         }
         let bytes = response.bytes()?;
         fs::write(&dest, &bytes)?;
 
-        if let Err(error) = verify_installer_hash(
-            installer.sha256.as_deref(),
-            &bytes,
-            request.ignore_security_hash,
-        ) {
+        if let Err(error) = verify_installer_hash(installer.sha256.as_deref(), &bytes, request.ignore_security_hash) {
             let _ = fs::remove_file(&dest);
             return Err(error);
         }
@@ -1287,11 +1226,7 @@ impl Repository {
         self.install_request(&request)
     }
 
-    pub fn install_with_mode(
-        &mut self,
-        query: &PackageQuery,
-        mode: InstallerMode,
-    ) -> Result<InstallResult> {
+    pub fn install_with_mode(&mut self, query: &PackageQuery, mode: InstallerMode) -> Result<InstallResult> {
         let mut request = InstallRequest::new(query.clone());
         request.mode = mode;
         self.install_request(&request)
@@ -1301,8 +1236,8 @@ impl Repository {
         let manifest = self.resolve_manifest_for_install(request)?;
         if !package_actions_supported() {
             let installer_type = select_installer(&manifest.installers, &request.query)
-                .and_then(|installer| installer.installer_type.clone())
-                .unwrap_or_else(|| "install".to_string())
+                .and_then(|installer| installer.installer_type)
+                .unwrap_or_else(|| "install".to_owned())
                 .to_lowercase();
             return Ok(unsupported_action_result(
                 manifest.id.clone(),
@@ -1313,13 +1248,11 @@ impl Repository {
         }
 
         let existing_match = self.find_installed_package_for_install(request, &manifest)?;
-        if let Some(no_op_result) =
-            Self::create_install_no_op_result(request, &manifest, existing_match.as_ref())
-        {
+        if let Some(no_op_result) = Self::create_install_no_op_result(request, &manifest, existing_match.as_ref()) {
             return Ok(no_op_result);
         }
 
-        self.ensure_package_agreements_accepted(&manifest, request)?;
+        Self::ensure_package_agreements_accepted(&manifest, request)?;
         self.install_dependencies(&manifest, request, &mut HashSet::new())?;
 
         if request.dependencies_only {
@@ -1327,7 +1260,7 @@ impl Repository {
                 package_id: manifest.id.clone(),
                 version: manifest.version.clone(),
                 installer_path: PathBuf::new(),
-                installer_type: "dependencies".to_string(),
+                installer_type: "dependencies".to_owned(),
                 exit_code: 0,
                 success: true,
                 no_op: false,
@@ -1340,16 +1273,8 @@ impl Repository {
 
         if request.uninstall_previous {
             let mut uninstall_request = UninstallRequest::new(PackageQuery {
-                id: request
-                    .query
-                    .id
-                    .clone()
-                    .or_else(|| Some(manifest.id.clone())),
-                query: request
-                    .query
-                    .query
-                    .clone()
-                    .or_else(|| Some(manifest.id.clone())),
+                id: request.query.id.clone().or_else(|| Some(manifest.id.clone())),
+                query: request.query.query.clone().or_else(|| Some(manifest.id.clone())),
                 source: request.query.source.clone(),
                 exact: true,
                 version: request.query.version.clone(),
@@ -1365,19 +1290,9 @@ impl Repository {
         let temp_dir = std::env::temp_dir().join("pinget-install");
         let (_, installer_path) = self.download_installer_for_request(request, &temp_dir)?;
 
-        let installer_type = installer
-            .installer_type
-            .as_deref()
-            .unwrap_or("exe")
-            .to_lowercase();
+        let installer_type = installer.installer_type.as_deref().unwrap_or("exe").to_lowercase();
 
-        let exit_code = dispatch_installer(
-            &installer_path,
-            &installer_type,
-            request,
-            &manifest,
-            &installer,
-        )?;
+        let exit_code = dispatch_installer(&installer_path, &installer_type, request, &manifest, &installer)?;
 
         Ok(InstallResult {
             package_id: manifest.id.clone(),
@@ -1398,11 +1313,7 @@ impl Repository {
     ) -> Result<Option<ListMatch>> {
         let installed_matches = self.list(&ListQuery {
             query: request.query.query.clone(),
-            id: request
-                .query
-                .id
-                .clone()
-                .or_else(|| Some(manifest.id.clone())),
+            id: request.query.id.clone().or_else(|| Some(manifest.id.clone())),
             name: request.query.name.clone(),
             moniker: request.query.moniker.clone(),
             tag: None,
@@ -1419,8 +1330,7 @@ impl Repository {
         })?;
 
         Ok(installed_matches.matches.into_iter().find(|candidate| {
-            candidate.id.eq_ignore_ascii_case(&manifest.id)
-                || candidate.local_id.eq_ignore_ascii_case(&manifest.id)
+            candidate.id.eq_ignore_ascii_case(&manifest.id) || candidate.local_id.eq_ignore_ascii_case(&manifest.id)
         }))
     }
 
@@ -1436,33 +1346,28 @@ impl Repository {
                 package_id: manifest.id.clone(),
                 version: existing_match.installed_version.clone(),
                 installer_path: PathBuf::new(),
-                installer_type: "install".to_string(),
+                installer_type: "install".to_owned(),
                 exit_code: 0,
                 success: true,
                 no_op: true,
-                warnings: vec![
-                    "Package is already installed; skipping because --no-upgrade was specified."
-                        .to_string(),
-                ],
+                warnings: vec!["Package is already installed; skipping because --no-upgrade was specified.".to_owned()],
             });
         }
 
         if !request.force
             && !existing_match.installed_version.trim().is_empty()
-            && compare_version(&existing_match.installed_version, &manifest.version)
-                != Ordering::Less
+            && compare_version(&existing_match.installed_version, &manifest.version) != Ordering::Less
         {
             return Some(InstallResult {
                 package_id: manifest.id.clone(),
                 version: existing_match.installed_version.clone(),
                 installer_path: PathBuf::new(),
-                installer_type: "install".to_string(),
+                installer_type: "install".to_owned(),
                 exit_code: 0,
                 success: true,
                 no_op: true,
                 warnings: vec![
-                    "Package is already installed and up to date; rerun with --force to reinstall."
-                        .to_string(),
+                    "Package is already installed and up to date; rerun with --force to reinstall.".to_owned(),
                 ],
             });
         }
@@ -1480,16 +1385,16 @@ impl Repository {
                 .or_else(|| request.query.moniker.clone())
                 .or_else(|| request.query.query.clone())
                 .or_else(|| request.product_code.clone())
-                .unwrap_or_else(|| "repair".to_string());
+                .unwrap_or_else(|| "repair".to_owned());
             return Ok(unsupported_action_result(
                 package_id,
                 request.query.version.clone().unwrap_or_default(),
-                "repair".to_string(),
+                "repair".to_owned(),
                 REPAIR_UNSUPPORTED_WARNING,
             ));
         }
 
-        let mut warnings = vec![REPAIR_REINSTALL_WARNING.to_string()];
+        let mut warnings = vec![REPAIR_REINSTALL_WARNING.to_owned()];
         let installed_match = if request.manifest_path.is_some() {
             None
         } else {
@@ -1504,10 +1409,8 @@ impl Repository {
             installed.matches.into_iter().next()
         };
 
-        let mut result = self.install_request(&Self::create_repair_install_request(
-            request,
-            installed_match.as_ref(),
-        ))?;
+        let mut result =
+            self.install_request(&Self::create_repair_install_request(request, installed_match.as_ref()))?;
         warnings.extend(result.warnings);
         result.warnings = warnings;
         Ok(result)
@@ -1526,11 +1429,8 @@ impl Repository {
     pub fn uninstall_request(&mut self, request: &UninstallRequest) -> Result<InstallResult> {
         if !package_actions_supported() {
             let (package_id, version) = if let Some(path) = &request.manifest_path {
-                let manifest = self.load_manifest_from_path(path)?;
-                (
-                    manifest.id,
-                    request.query.version.clone().unwrap_or(manifest.version),
-                )
+                let manifest = Self::load_manifest_from_path(path)?;
+                (manifest.id, request.query.version.clone().unwrap_or(manifest.version))
             } else {
                 (
                     request
@@ -1541,7 +1441,7 @@ impl Repository {
                         .or_else(|| request.query.name.clone())
                         .or_else(|| request.query.moniker.clone())
                         .or_else(|| request.product_code.clone())
-                        .unwrap_or_else(|| "unknown".to_string()),
+                        .unwrap_or_else(|| "unknown".to_owned()),
                     request.query.version.clone().unwrap_or_default(),
                 )
             };
@@ -1575,7 +1475,7 @@ impl Repository {
             installer_type: installed
                 .installer_category
                 .clone()
-                .unwrap_or_else(|| "uninstall".to_string()),
+                .unwrap_or_else(|| "uninstall".to_owned()),
             exit_code,
             success: exit_code == 0,
             no_op: false,
@@ -1585,7 +1485,7 @@ impl Repository {
 
     fn resolve_manifest_for_install(&mut self, request: &InstallRequest) -> Result<Manifest> {
         if let Some(path) = &request.manifest_path {
-            return self.load_manifest_from_path(path);
+            return Self::load_manifest_from_path(path);
         }
 
         let (located, _warnings) = self.find_single_match(&request.query)?;
@@ -1593,15 +1493,9 @@ impl Repository {
         Ok(manifest)
     }
 
-    fn ensure_package_agreements_accepted(
-        &self,
-        manifest: &Manifest,
-        request: &InstallRequest,
-    ) -> Result<()> {
+    fn ensure_package_agreements_accepted(manifest: &Manifest, request: &InstallRequest) -> Result<()> {
         if !request.accept_package_agreements && !manifest.agreements.is_empty() {
-            bail!(
-                "Package agreements are present; rerun with --accept-package-agreements to continue."
-            );
+            bail!("Package agreements are present; rerun with --accept-package-agreements to continue.");
         }
         Ok(())
     }
@@ -1670,10 +1564,7 @@ impl Repository {
         }
     }
 
-    fn create_repair_install_request(
-        request: &RepairRequest,
-        installed_match: Option<&ListMatch>,
-    ) -> InstallRequest {
+    fn create_repair_install_request(request: &RepairRequest, installed_match: Option<&ListMatch>) -> InstallRequest {
         let mut query = request.query.clone();
         query.query = if installed_match.is_none() {
             request.query.query.clone()
@@ -1730,16 +1621,13 @@ impl Repository {
         let mut effective_product_code = request.product_code.clone();
 
         if let Some(path) = &request.manifest_path {
-            let manifest = self.load_manifest_from_path(path)?;
+            let manifest = Self::load_manifest_from_path(path)?;
             effective_query = PackageQuery {
                 query: Some(manifest.id.clone()),
                 id: Some(manifest.id.clone()),
                 name: Some(manifest.name.clone()),
                 exact: true,
-                version: effective_query
-                    .version
-                    .clone()
-                    .or_else(|| Some(manifest.version)),
+                version: effective_query.version.clone().or(Some(manifest.version)),
                 ..PackageQuery::default()
             };
             effective_product_code = effective_product_code.or_else(|| {
@@ -1760,13 +1648,9 @@ impl Repository {
             product_code: effective_product_code,
             version: effective_query.version.clone(),
             source: effective_query.source.clone(),
-            count: if request.all_versions {
-                None
-            } else {
-                Some(100)
-            },
+            count: if request.all_versions { None } else { Some(100) },
             exact: effective_query.exact,
-            install_scope: effective_query.install_scope.clone(),
+            install_scope: effective_query.install_scope,
             upgrade_only: false,
             include_unknown: false,
             include_pinned: false,
@@ -1777,9 +1661,7 @@ impl Repository {
             bail!("No installed package found matching the query");
         }
         if !request.all_versions && list_result.matches.len() > 1 && !request.force {
-            bail!(
-                "Multiple installed packages matched the query; refine the query or use --all-versions."
-            );
+            bail!("Multiple installed packages matched the query; refine the query or use --all-versions.");
         }
 
         Ok(if request.all_versions {
@@ -1789,10 +1671,10 @@ impl Repository {
         })
     }
 
-    fn load_manifest_from_path(&self, manifest_path: &Path) -> Result<Manifest> {
+    fn load_manifest_from_path(manifest_path: &Path) -> Result<Manifest> {
         let resolved = resolve_manifest_path(manifest_path)?;
-        let bytes = fs::read(&resolved)
-            .with_context(|| format!("failed to read manifest from {}", resolved.display()))?;
+        let bytes =
+            fs::read(&resolved).with_context(|| format!("failed to read manifest from {}", resolved.display()))?;
         parse_yaml_manifest(&bytes)
     }
 
@@ -1854,8 +1736,7 @@ impl Repository {
 
         if semantics == SearchSemantics::Many {
             matches.sort_by(|left, right| {
-                search_match_sort_score(&right.display, query)
-                    .cmp(&search_match_sort_score(&left.display, query))
+                search_match_sort_score(&right.display, query).cmp(&search_match_sort_score(&left.display, query))
             });
             let limit = max_results(query);
             if matches.len() > limit {
@@ -1879,11 +1760,7 @@ impl Repository {
         }
     }
 
-    fn versions_for_match(
-        &mut self,
-        located: &LocatedMatch,
-        _query: &PackageQuery,
-    ) -> Result<Vec<VersionKey>> {
+    fn versions_for_match(&mut self, located: &LocatedMatch, _query: &PackageQuery) -> Result<Vec<VersionKey>> {
         match &located.locator {
             MatchLocator::PreIndexedV1 { package_rowid } => {
                 let source = self.source_clone(located.source_index);
@@ -1898,11 +1775,7 @@ impl Repository {
                     .collect::<Vec<_>>();
                 sort_versions_desc(&mut keys);
                 if keys.is_empty() {
-                    bail!(
-                        "no versions found for {} in {}",
-                        located.display.id,
-                        source.name
-                    );
+                    bail!("no versions found for {} in {}", located.display.id, source.name);
                 }
                 Ok(keys)
             }
@@ -1911,8 +1784,7 @@ impl Repository {
                 package_hash,
             } => {
                 let source = self.source_clone(located.source_index);
-                let (entries, _) =
-                    self.load_v2_version_data(&source, *package_rowid, package_hash.as_str())?;
+                let (entries, _) = self.load_v2_version_data(&source, *package_rowid, package_hash.as_str())?;
                 let mut keys = entries
                     .into_iter()
                     .map(|entry| VersionKey {
@@ -1941,21 +1813,13 @@ impl Repository {
                 let source = self.source_clone(located.source_index);
                 let connection = self.open_preindexed_connection(located.source_index)?;
                 let versions = query_v1_versions(&connection, *package_rowid)?;
-                let selected = select_v1_version(
-                    &versions,
-                    query.version.as_deref(),
-                    query.channel.as_deref(),
-                )?;
+                let selected = select_v1_version(&versions, query.version.as_deref(), query.channel.as_deref())?;
                 let relative_path = resolve_v1_relative_path(&connection, selected.pathpart_id)?;
-                let bytes = self.get_cached_source_file(
-                    "V1_M",
-                    &source,
-                    &relative_path,
-                    selected.manifest_hash.as_deref(),
-                )?;
+                let bytes =
+                    self.get_cached_source_file("V1_M", &source, &relative_path, selected.manifest_hash.as_deref())?;
                 let (mut manifest, manifest_documents) = parse_yaml_manifest_bundle(&bytes.bytes)?;
                 manifest.version = selected.version.clone();
-                manifest.channel = selected.channel.clone();
+                manifest.channel = selected.channel;
                 Ok((manifest, manifest_documents, vec![bytes.path]))
             }
             MatchLocator::PreIndexedV2 {
@@ -1972,31 +1836,19 @@ impl Repository {
                     &selected.manifest_relative_path,
                     Some(selected.manifest_hash.as_str()),
                 )?;
-                let (mut manifest, manifest_documents) =
-                    parse_yaml_manifest_bundle(&manifest_bytes.bytes)?;
-                manifest.version = selected.version.clone();
+                let (mut manifest, manifest_documents) = parse_yaml_manifest_bundle(&manifest_bytes.bytes)?;
+                manifest.version = selected.version;
                 Ok((
                     manifest,
                     manifest_documents,
                     vec![version_data_file, manifest_bytes.path],
                 ))
             }
-            MatchLocator::Rest {
-                package_id,
-                versions,
-            } => {
+            MatchLocator::Rest { package_id, versions } => {
                 let source = self.source_clone(located.source_index);
-                let selected = select_rest_version(
-                    versions,
-                    query.version.as_deref(),
-                    query.channel.as_deref(),
-                )?;
-                let (bytes, cache_path) = self.get_or_fetch_rest_manifest(
-                    &source,
-                    package_id,
-                    &selected.version,
-                    &selected.channel,
-                )?;
+                let selected = select_rest_version(versions, query.version.as_deref(), query.channel.as_deref())?;
+                let (bytes, cache_path) =
+                    self.get_or_fetch_rest_manifest(&source, package_id, &selected.version, &selected.channel)?;
                 let (manifest, manifest_documents) =
                     parse_rest_manifest(&bytes, package_id, &selected.version, &selected.channel)?;
                 Ok((manifest, manifest_documents, vec![cache_path]))
@@ -2104,8 +1956,8 @@ impl Repository {
         for item in data {
             let package_id = json_string(&item, "PackageIdentifier")
                 .ok_or_else(|| anyhow!("REST search result missing PackageIdentifier"))?;
-            let package_name = json_string(&item, "PackageName")
-                .ok_or_else(|| anyhow!("REST search result missing PackageName"))?;
+            let package_name =
+                json_string(&item, "PackageName").ok_or_else(|| anyhow!("REST search result missing PackageName"))?;
             let mut versions = parse_rest_versions(&item)?;
             sort_versions_desc(&mut versions);
             let latest = versions
@@ -2129,10 +1981,7 @@ impl Repository {
                     match_criteria: rest_match_criteria(&item, query, semantics),
                 },
                 source_index,
-                locator: MatchLocator::Rest {
-                    package_id,
-                    versions,
-                },
+                locator: MatchLocator::Rest { package_id, versions },
             });
         }
 
@@ -2150,17 +1999,13 @@ impl Repository {
             self.save_store()?;
         }
 
-        self.open_sqlite_connection(index_path)
-            .context("failed to open preindexed index")
+        Self::open_sqlite_connection(index_path).context("failed to open preindexed index")
     }
 
-    fn open_sqlite_connection(&self, path: PathBuf) -> Result<Connection> {
+    fn open_sqlite_connection(path: PathBuf) -> Result<Connection> {
         let path_text = path.to_string_lossy().into_owned();
-        Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )
-        .with_context(|| format!("failed to open SQLite database at {path_text}"))
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
+            .with_context(|| format!("failed to open SQLite database at {path_text}"))
     }
 
     fn update_preindexed(&mut self, source_index: usize) -> Result<String> {
@@ -2178,9 +2023,7 @@ impl Repository {
                         .get("x-ms-meta-sourceversion")
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_string);
-                    let bytes = response
-                        .bytes()
-                        .context("failed to read preindexed package bytes")?;
+                    let bytes = response.bytes().context("failed to read preindexed package bytes")?;
                     let payload = bytes.to_vec();
                     let index_bytes = extract_zip_member(&payload, "Public/index.db")
                         .context("preindexed package did not contain Public/index.db")?;
@@ -2194,11 +2037,7 @@ impl Repository {
                     return Ok(format!("downloaded {}", candidate));
                 }
                 Ok(response) => {
-                    last_error = Some(anyhow!(
-                        "candidate {} returned HTTP {}",
-                        candidate,
-                        response.status()
-                    ));
+                    last_error = Some(anyhow!("candidate {} returned HTTP {}", candidate, response.status()));
                 }
                 Err(error) => {
                     last_error = Some(anyhow!("candidate {} failed: {error}", candidate));
@@ -2216,9 +2055,8 @@ impl Repository {
             source.identifier = info.source_identifier.clone();
         }
         source.last_update = Some(Utc::now());
-        source.source_version =
-            choose_contract(&info.server_supported_versions).map(str::to_string);
-        Ok("refreshed information cache".to_string())
+        source.source_version = choose_contract(&info.server_supported_versions).map(str::to_string);
+        Ok("refreshed information cache".to_owned())
     }
 
     fn load_rest_information(&mut self, source_index: usize) -> Result<RestInformation> {
@@ -2238,11 +2076,7 @@ impl Repository {
         self.fetch_rest_information(source_index, true)
     }
 
-    fn fetch_rest_information(
-        &mut self,
-        source_index: usize,
-        persist: bool,
-    ) -> Result<RestInformation> {
+    fn fetch_rest_information(&mut self, source_index: usize, persist: bool) -> Result<RestInformation> {
         let source = self.source_clone(source_index);
         let url = format!("{}/information", source.arg.trim_end_matches('/'));
         let response = self
@@ -2266,7 +2100,7 @@ impl Repository {
 
         if persist {
             let cache = RestInfoCache {
-                expires_at: Utc::now() + Duration::seconds(max_age as i64),
+                expires_at: Utc::now() + Duration::seconds(i64::try_from(max_age).unwrap_or(i64::MAX)),
                 value: info.clone(),
             };
             write_json(rest_information_cache_path(&self.app_root, &source), &cache)?;
@@ -2281,8 +2115,7 @@ impl Repository {
         package_rowid: i64,
         package_hash: &str,
     ) -> Result<(Vec<PackageVersionDataEntry>, PathBuf)> {
-        let connection = self
-            .open_sqlite_connection(preindexed_index_path(&self.app_root, source))
+        let connection = Self::open_sqlite_connection(preindexed_index_path(&self.app_root, source))
             .context("failed to reopen preindexed index for V2 version data")?;
         let package_hash = package_hash.to_ascii_lowercase();
         let package_id = query_optional_value(
@@ -2293,11 +2126,10 @@ impl Repository {
         )?
         .ok_or_else(|| anyhow!("failed to resolve package id for V2 version data"))?;
         let relative_path = package_version_data_relative_path(&package_id, &package_hash);
-        let file =
-            self.get_cached_source_file("V2_PVD", source, &relative_path, Some(&package_hash))?;
+        let file = self.get_cached_source_file("V2_PVD", source, &relative_path, Some(&package_hash))?;
         let yaml = decompress_mszyml(&file.bytes)?;
-        let document = serde_yaml::from_str::<PackageVersionDataDocument>(&yaml)
-            .context("failed to parse versionData.mszyml")?;
+        let document =
+            serde_yaml::from_str::<PackageVersionDataDocument>(&yaml).context("failed to parse versionData.mszyml")?;
         Ok((document.versions, file.path))
     }
 
@@ -2309,8 +2141,7 @@ impl Repository {
         expected_hash: Option<&str>,
     ) -> Result<CachedBytes> {
         let normalized_relative = relative_path.replace('\\', "/");
-        let cache_path = temp_cache_path(bucket, &source.identifier)
-            .join(normalized_relative.replace('/', "\\"));
+        let cache_path = temp_cache_path(bucket, &source.identifier).join(normalized_relative.replace('/', "\\"));
 
         if cache_path.exists() {
             let cached = fs::read(&cache_path).context("failed to read cached source file")?;
@@ -2334,10 +2165,7 @@ impl Repository {
             .context("failed to fetch source file")?
             .error_for_status()
             .context("source file request returned an error")?;
-        let bytes = response
-            .bytes()
-            .context("failed to read source file body")?
-            .to_vec();
+        let bytes = response.bytes().context("failed to read source file body")?.to_vec();
 
         if let Some(hash) = expected_hash {
             verify_hash(hash, &bytes)?;
@@ -2372,15 +2200,11 @@ impl Repository {
         let info = self.load_rest_information_by_name(&source.name)?;
         let contract = choose_contract(&info.server_supported_versions)
             .ok_or_else(|| anyhow!("no compatible REST contract for {}", source.name))?;
-        let url = format!(
-            "{}/packageManifests/{}",
-            source.arg.trim_end_matches('/'),
-            package_id
-        );
+        let url = format!("{}/packageManifests/{}", source.arg.trim_end_matches('/'), package_id);
 
-        let mut params = vec![("Version", version.to_string())];
+        let mut params = vec![("Version", version.to_owned())];
         if !channel.is_empty() {
-            params.push(("Channel", channel.to_string()));
+            params.push(("Channel", channel.to_owned()));
         }
         if info
             .required_query_parameters
@@ -2532,9 +2356,7 @@ fn installed_package_has_upgrade(package: &InstalledPackage) -> bool {
         .correlated
         .as_ref()
         .and_then(|candidate| candidate.version.as_deref())
-        .is_some_and(|version| {
-            compare_version(version, &package.installed_version) == Ordering::Greater
-        })
+        .is_some_and(|version| compare_version(version, &package.installed_version) == Ordering::Greater)
 }
 
 fn installed_package_has_unknown_version(package: &InstalledPackage) -> bool {
@@ -2543,9 +2365,7 @@ fn installed_package_has_unknown_version(package: &InstalledPackage) -> bool {
 
 fn installed_package_matches_upgrade_filter(package: &InstalledPackage, query: &ListQuery) -> bool {
     installed_package_has_upgrade(package)
-        || (query.include_unknown
-            && installed_package_has_unknown_version(package)
-            && package.correlated.is_some())
+        || (query.include_unknown && installed_package_has_unknown_version(package) && package.correlated.is_some())
 }
 
 fn find_applicable_pin<'a>(item: &ListMatch, pins: &'a [PinRecord]) -> Option<&'a PinRecord> {
@@ -2553,9 +2373,7 @@ fn find_applicable_pin<'a>(item: &ListMatch, pins: &'a [PinRecord]) -> Option<&'
     let mut source_agnostic = None;
 
     for pin in pins {
-        if !pin.package_id.eq_ignore_ascii_case(&item.id)
-            && !pin.package_id.eq_ignore_ascii_case(&item.local_id)
-        {
+        if !pin.package_id.eq_ignore_ascii_case(&item.id) && !pin.package_id.eq_ignore_ascii_case(&item.local_id) {
             continue;
         }
 
@@ -2586,9 +2404,7 @@ fn is_upgrade_blocked_by_pin(item: &ListMatch, pins: &[PinRecord]) -> bool {
 
     match pin.pin_type {
         PinType::Blocking => true,
-        PinType::Gating | PinType::Pinning => {
-            !version_matches_pin_pattern(available_version, &pin.version)
-        }
+        PinType::Gating | PinType::Pinning => !version_matches_pin_pattern(available_version, &pin.version),
     }
 }
 
@@ -2603,9 +2419,7 @@ fn version_matches_pin_pattern(version: &str, pattern: &str) -> bool {
 
     if pattern.ends_with('*') && pattern.matches('*').count() == 1 {
         let prefix = &pattern[..pattern.len() - 1];
-        return version
-            .to_ascii_lowercase()
-            .starts_with(&prefix.to_ascii_lowercase());
+        return version.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase());
     }
 
     version.eq_ignore_ascii_case(pattern)
@@ -2615,8 +2429,7 @@ fn list_match_from_installed(package: InstalledPackage) -> ListMatch {
     let available_version = package.correlated.as_ref().and_then(|candidate| {
         candidate.version.as_ref().and_then(|candidate_version| {
             if installed_package_has_unknown_version(&package)
-                || compare_version(candidate_version, &package.installed_version)
-                    == Ordering::Greater
+                || compare_version(candidate_version, &package.installed_version) == Ordering::Greater
             {
                 Some(candidate_version.clone())
             } else {
@@ -2697,12 +2510,11 @@ fn list_package_matches(package: &InstalledPackage, query: &ListQuery) -> bool {
     }
 
     if let Some(value) = &query.query {
-        let local_match = matches_text(&package.name, value, query.exact)
-            || matches_text(&package.local_id, value, query.exact);
+        let local_match =
+            matches_text(&package.name, value, query.exact) || matches_text(&package.local_id, value, query.exact);
         let correlated_match = correlated
             .map(|candidate| {
-                matches_text(&candidate.id, value, query.exact)
-                    || matches_text(&candidate.name, value, query.exact)
+                matches_text(&candidate.id, value, query.exact) || matches_text(&candidate.name, value, query.exact)
             })
             .unwrap_or(false);
         if !local_match && !correlated_match {
@@ -2718,9 +2530,7 @@ fn list_package_matches(package: &InstalledPackage, query: &ListQuery) -> bool {
         return false;
     }
 
-    if (query.moniker.is_some() || query.tag.is_some() || query.command.is_some())
-        && correlated.is_none()
-    {
+    if (query.moniker.is_some() || query.tag.is_some() || query.command.is_some()) && correlated.is_none() {
         return false;
     }
 
@@ -2750,10 +2560,7 @@ fn correlate_installed_package(
                 normalized == candidate_name
             }) {
                 900
-            } else if allow_loose_name_match
-                && candidate_name.len() >= 6
-                && installed_name.contains(&candidate_name)
-            {
+            } else if allow_loose_name_match && candidate_name.len() >= 6 && installed_name.contains(&candidate_name) {
                 700
             } else {
                 0
@@ -2767,9 +2574,9 @@ fn correlate_installed_package(
 
 fn correlation_name_candidates(name: &str) -> Vec<String> {
     let mut candidates = Vec::new();
-    candidates.push(name.trim().to_string());
+    candidates.push(name.trim().to_owned());
 
-    let mut trimmed = name.trim().to_string();
+    let mut trimmed = name.trim().to_owned();
     if let Some(index) = trimmed.find(" (") {
         trimmed.truncate(index);
     }
@@ -2780,10 +2587,7 @@ fn correlation_name_candidates(name: &str) -> Vec<String> {
             .trim_matches(|ch: char| ch == '(' || ch == ')')
             .to_ascii_lowercase();
         if !words.is_empty()
-            && (lower == "x64"
-                || lower == "x86"
-                || lower == "arm64"
-                || token.chars().any(|ch| ch.is_ascii_digit()))
+            && (lower == "x64" || lower == "x86" || lower == "arm64" || token.chars().any(|ch| ch.is_ascii_digit()))
         {
             break;
         }
@@ -2888,43 +2692,35 @@ fn collect_uninstall_view(
             Ok(key) => key,
             Err(_) => continue,
         };
-        if read_reg_dword(&subkey, "SystemComponent") == Some(1)
-            || read_reg_string(&subkey, "ParentKeyName").is_some()
+        if read_reg_dword(&subkey, "SystemComponent") == Some(1) || read_reg_string(&subkey, "ParentKeyName").is_some()
         {
             continue;
         }
 
-        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty())
-        else {
+        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty()) else {
             continue;
         };
 
         let local_id = format!(r"ARP\{scope}\{arch}\{key_name}");
-        let installed_version =
-            read_reg_string(&subkey, "DisplayVersion").unwrap_or_else(|| "Unknown".to_string());
+        let installed_version = read_reg_string(&subkey, "DisplayVersion").unwrap_or_else(|| "Unknown".to_owned());
         let publisher = read_reg_string(&subkey, "Publisher");
         let install_location = read_reg_string(&subkey, "InstallLocation");
         let package_family_names = read_reg_string(&subkey, "PackageFamilyName")
             .into_iter()
             .collect::<Vec<_>>();
-        let mut product_codes = read_reg_string(&subkey, "ProductCode")
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut product_codes = read_reg_string(&subkey, "ProductCode").into_iter().collect::<Vec<_>>();
         if product_codes.is_empty() && looks_like_product_code(&key_name) {
             product_codes.push(key_name.to_ascii_lowercase());
         }
-        let upgrade_codes = read_reg_string(&subkey, "UpgradeCode")
-            .into_iter()
-            .collect::<Vec<_>>();
-        let installer_category = if local_id.starts_with("ARP\\")
-            && read_reg_dword(&subkey, "WindowsInstaller") == Some(1)
-        {
-            Some("msi".to_string())
-        } else if key_name.starts_with("MSIX\\") {
-            Some("msix".to_string())
-        } else {
-            Some("exe".to_string())
-        };
+        let upgrade_codes = read_reg_string(&subkey, "UpgradeCode").into_iter().collect::<Vec<_>>();
+        let installer_category =
+            if local_id.starts_with("ARP\\") && read_reg_dword(&subkey, "WindowsInstaller") == Some(1) {
+                Some("msi".to_owned())
+            } else if key_name.starts_with("MSIX\\") {
+                Some("msix".to_owned())
+            } else {
+                Some("exe".to_owned())
+            };
 
         let dedupe_key = format!(
             "{}|{}|{}|{}",
@@ -2942,7 +2738,7 @@ fn collect_uninstall_view(
             local_id,
             installed_version,
             publisher,
-            scope: Some(scope.to_string()),
+            scope: Some(scope.to_owned()),
             installer_category,
             install_location,
             package_family_names,
@@ -2963,7 +2759,8 @@ fn collect_appmodel_packages(
     scope: &str,
     flags: u32,
 ) -> Result<()> {
-    const APPMODEL_PACKAGES_PATH: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+    const APPMODEL_PACKAGES_PATH: &str =
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
 
     let appmodel = match root.open_subkey_with_flags(APPMODEL_PACKAGES_PATH, flags) {
         Ok(key) => key,
@@ -2976,15 +2773,11 @@ fn collect_appmodel_packages(
             Err(_) => continue,
         };
 
-        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty())
-        else {
+        let Some(name) = read_reg_string(&subkey, "DisplayName").filter(|value| !value.is_empty()) else {
             continue;
         };
         let install_location = read_reg_string(&subkey, "PackageRootFolder");
-        if install_location
-            .as_deref()
-            .is_some_and(is_windows_system_path)
-        {
+        if install_location.as_deref().is_some_and(is_windows_system_path) {
             continue;
         }
 
@@ -3008,8 +2801,8 @@ fn collect_appmodel_packages(
             local_id,
             installed_version: metadata.version,
             publisher: None,
-            scope: Some(scope.to_string()),
-            installer_category: Some("msix".to_string()),
+            scope: Some(scope.to_owned()),
+            installer_category: Some("msix".to_owned()),
             install_location,
             package_family_names: vec![metadata.family_name],
             product_codes: Vec::new(),
@@ -3053,7 +2846,7 @@ fn parse_msix_package_full_name(value: &str) -> Option<ParsedMsixPackageFullName
     };
 
     Some(ParsedMsixPackageFullName {
-        version: version.to_string(),
+        version: version.to_owned(),
         family_name,
     })
 }
@@ -3067,7 +2860,7 @@ fn is_windows_system_path(path: &str) -> bool {
 fn read_reg_string(key: &RegKey, value_name: &str) -> Option<String> {
     key.get_value::<String, _>(value_name)
         .ok()
-        .map(|value| value.trim().to_string())
+        .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
@@ -3082,8 +2875,7 @@ fn looks_like_product_code(value: &str) -> bool {
 }
 
 fn ensure_app_dirs(app_root: &Path) -> Result<()> {
-    fs::create_dir_all(app_root.join("sources"))
-        .context("failed to create app source directory")?;
+    fs::create_dir_all(app_root.join("sources")).context("failed to create app source directory")?;
     Ok(())
 }
 
@@ -3106,11 +2898,9 @@ fn admin_settings_path(app_root: &Path) -> PathBuf {
 }
 
 fn source_state_dir(app_root: &Path, source: &SourceRecord) -> PathBuf {
-    app_root.join("sources").join(
-        source
-            .name
-            .replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_"),
-    )
+    app_root
+        .join("sources")
+        .join(source.name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_"))
 }
 
 fn preindexed_package_path(app_root: &Path, source: &SourceRecord) -> PathBuf {
@@ -3125,16 +2915,8 @@ fn rest_information_cache_path(app_root: &Path, source: &SourceRecord) -> PathBu
     source_state_dir(app_root, source).join("rest-information.json")
 }
 
-fn rest_manifest_cache_path(
-    source: &SourceRecord,
-    package_id: &str,
-    version: &str,
-    channel: &str,
-) -> PathBuf {
-    let key = format!(
-        "{}|{}|{}|{}",
-        source.identifier, package_id, version, channel
-    );
+fn rest_manifest_cache_path(source: &SourceRecord, package_id: &str, version: &str, channel: &str) -> PathBuf {
+    let key = format!("{}|{}|{}|{}", source.identifier, package_id, version, channel);
     let digest = sha256_hex(key.as_bytes());
     std::env::temp_dir()
         .join("cache")
@@ -3217,23 +2999,20 @@ fn merge_json_objects(
 fn json_contains(current: &JsonValue, expected: &JsonValue) -> bool {
     match expected {
         JsonValue::Object(expected_object) => match current {
-            JsonValue::Object(current_object) => {
-                expected_object.iter().all(|(key, expected_child)| {
-                    current_object
-                        .get(key)
-                        .is_some_and(|current_child| json_contains(current_child, expected_child))
-                })
-            }
+            JsonValue::Object(current_object) => expected_object.iter().all(|(key, expected_child)| {
+                current_object
+                    .get(key)
+                    .is_some_and(|current_child| json_contains(current_child, expected_child))
+            }),
             _ => false,
         },
         JsonValue::Array(expected_array) => match current {
             JsonValue::Array(current_array) => {
                 current_array.len() == expected_array.len()
-                    && current_array.iter().zip(expected_array.iter()).all(
-                        |(current_child, expected_child)| {
-                            json_contains(current_child, expected_child)
-                        },
-                    )
+                    && current_array
+                        .iter()
+                        .zip(expected_array.iter())
+                        .all(|(current_child, expected_child)| json_contains(current_child, expected_child))
             }
             _ => false,
         },
@@ -3242,14 +3021,9 @@ fn json_contains(current: &JsonValue, expected: &JsonValue) -> bool {
 }
 
 fn normalize_source_trust_level(trust_level: Option<&str>) -> Result<String> {
-    match trust_level
-        .unwrap_or("none")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "none" | "default" => Ok("None".to_string()),
-        "trusted" => Ok("Trusted".to_string()),
+    match trust_level.unwrap_or("none").trim().to_ascii_lowercase().as_str() {
+        "none" | "default" => Ok("None".to_owned()),
+        "trusted" => Ok("Trusted".to_owned()),
         other => bail!("unsupported source trust level: {other}"),
     }
 }
@@ -3263,15 +3037,10 @@ fn normalize_admin_setting_name(name: &str) -> Result<&'static str> {
 }
 
 fn default_source_trust_level() -> String {
-    "None".to_string()
+    "None".to_owned()
 }
 
-fn query_rows<T, F>(
-    connection: &Connection,
-    sql: &str,
-    params: Vec<SqlValue>,
-    mut map: F,
-) -> Result<Vec<T>>
+fn query_rows<T, F>(connection: &Connection, sql: &str, params: Vec<SqlValue>, mut map: F) -> Result<Vec<T>>
 where
     F: FnMut(&SqlRow<'_>) -> Result<T>,
 {
@@ -3290,12 +3059,7 @@ where
     Ok(result)
 }
 
-fn query_optional_value<T, F>(
-    connection: &Connection,
-    sql: &str,
-    params: Vec<SqlValue>,
-    map: F,
-) -> Result<Option<T>>
+fn query_optional_value<T, F>(connection: &Connection, sql: &str, params: Vec<SqlValue>, map: F) -> Result<Option<T>>
 where
     F: FnOnce(&SqlRow<'_>) -> Result<T>,
 {
@@ -3324,9 +3088,7 @@ fn row_string(row: &SqlRow<'_>, index: usize) -> Result<String> {
             .map(str::to_owned),
         ValueRef::Integer(value) => Ok(value.to_string()),
         ValueRef::Real(value) => Ok(value.to_string()),
-        ValueRef::Blob(value) => {
-            String::from_utf8(value.to_vec()).context("SQL blob column was not valid UTF-8")
-        }
+        ValueRef::Blob(value) => String::from_utf8(value.to_vec()).context("SQL blob column was not valid UTF-8"),
         ValueRef::Null => bail!("SQL column {index} was unexpectedly NULL"),
     }
 }
@@ -3354,7 +3116,7 @@ fn row_i64(row: &SqlRow<'_>, index: usize) -> Result<i64> {
             .context("SQL text column was not valid UTF-8")?
             .parse::<i64>()
             .with_context(|| format!("failed to parse integer from SQL text column {index}")),
-        ValueRef::Real(value) => Ok(value as i64),
+        ValueRef::Real(value) => f64_to_i64_checked(value, index),
         ValueRef::Null => bail!("SQL column {index} was unexpectedly NULL"),
         ValueRef::Blob(_) => bail!("SQL column {index} was unexpectedly a blob"),
     }
@@ -3368,7 +3130,7 @@ fn row_hex_string(row: &SqlRow<'_>, index: usize) -> Result<String> {
             .to_ascii_lowercase()),
         ValueRef::Null => bail!("SQL column {index} was unexpectedly NULL"),
         ValueRef::Integer(value) => Ok(format!("{value:x}")),
-        ValueRef::Real(value) => Ok(format!("{:x}", value as i64)),
+        ValueRef::Real(value) => Ok(format!("{:x}", f64_to_i64_checked(value, index)?)),
     }
 }
 
@@ -3382,8 +3144,26 @@ fn row_opt_hex_string(row: &SqlRow<'_>, index: usize) -> Result<Option<String>> 
                 .to_ascii_lowercase(),
         )),
         ValueRef::Integer(value) => Ok(Some(format!("{value:x}"))),
-        ValueRef::Real(value) => Ok(Some(format!("{:x}", value as i64))),
+        ValueRef::Real(value) => Ok(Some(format!("{:x}", f64_to_i64_checked(value, index)?))),
     }
+}
+
+fn f64_to_i64_checked(value: f64, index: usize) -> Result<i64> {
+    if !value.is_finite() {
+        bail!("SQL column {index} contained a non-finite floating-point value");
+    }
+
+    if value.fract() != 0.0 {
+        bail!("SQL column {index} contained a non-integer floating-point value");
+    }
+
+    if !(-9_223_372_036_854_775_808.0..=9_223_372_036_854_775_807.0).contains(&value) {
+        bail!("SQL column {index} contained a floating-point value outside the i64 range");
+    }
+
+    format!("{value:.0}")
+        .parse::<i64>()
+        .with_context(|| format!("failed to parse integer from SQL floating-point column {index}"))
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -3479,12 +3259,8 @@ fn group_v1_rows(rows: Vec<V1SearchRow>) -> Vec<V1SearchRow> {
     for row in rows {
         match grouped.get(&row.package_rowid) {
             Some(existing)
-                if compare_version_and_channel(
-                    &existing.version,
-                    &existing.channel,
-                    &row.version,
-                    &row.channel,
-                ) != Ordering::Less => {}
+                if compare_version_and_channel(&existing.version, &existing.channel, &row.version, &row.channel)
+                    != Ordering::Less => {}
             _ => {
                 grouped.insert(row.package_rowid, row);
             }
@@ -3504,19 +3280,14 @@ fn query_v1_versions(connection: &Connection, package_rowid: i64) -> Result<Vec<
          JOIN channels ON manifest.channel = channels.rowid \
          WHERE manifest.id = ?1"
     );
-    query_rows(
-        connection,
-        &sql,
-        vec![SqlValue::Integer(package_rowid)],
-        |row| {
-            Ok(V1VersionRow {
-                version: row_string(row, 0)?,
-                channel: row_string(row, 1)?,
-                pathpart_id: row_i64(row, 2)?,
-                manifest_hash: row_opt_hex_string(row, 3)?,
-            })
-        },
-    )
+    query_rows(connection, &sql, vec![SqlValue::Integer(package_rowid)], |row| {
+        Ok(V1VersionRow {
+            version: row_string(row, 0)?,
+            channel: row_string(row, 1)?,
+            pathpart_id: row_i64(row, 2)?,
+            manifest_hash: row_opt_hex_string(row, 3)?,
+        })
+    })
 }
 
 fn resolve_v1_relative_path(connection: &Connection, pathpart_id: i64) -> Result<String> {
@@ -3560,12 +3331,9 @@ fn can_fallback_to_v1(error: &anyhow::Error) -> bool {
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
-    for value in query_rows(
-        connection,
-        &format!("PRAGMA table_info({table})"),
-        Vec::new(),
-        |row| row_string(row, 1),
-    )? {
+    for value in query_rows(connection, &format!("PRAGMA table_info({table})"), Vec::new(), |row| {
+        row_string(row, 1)
+    })? {
         if value.eq_ignore_ascii_case(column) {
             return Ok(true);
         }
@@ -3574,16 +3342,8 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
     Ok(false)
 }
 
-fn build_preindexed_where_clause(
-    query: &PackageQuery,
-    v2: bool,
-    semantics: SearchSemantics,
-) -> (String, Vec<String>) {
-    let rowid_column = if v2 {
-        "packages.rowid"
-    } else {
-        "manifest.rowid"
-    };
+fn build_preindexed_where_clause(query: &PackageQuery, v2: bool, semantics: SearchSemantics) -> (String, Vec<String>) {
+    let rowid_column = if v2 { "packages.rowid" } else { "manifest.rowid" };
     let id_column = if v2 { "id" } else { "ids.id" };
     let name_column = if v2 { "name" } else { "names.name" };
     let moniker_column = if v2 { "moniker" } else { "monikers.moniker" };
@@ -3622,7 +3382,7 @@ fn build_preindexed_where_clause(
     }
     if let Some(value) = &query.query {
         if exact_match {
-            let conditions = vec![
+            let conditions = [
                 single_field_condition(id_column, value, true, &mut params),
                 single_field_condition(name_column, value, true, &mut params),
                 single_field_condition(moniker_column, value, true, &mut params),
@@ -3656,15 +3416,10 @@ fn build_preindexed_where_clause(
         return (format!("({})", conditions.join(" OR ")), params);
     }
 
-    ("1 = 1".to_string(), Vec::new())
+    ("1 = 1".to_owned(), Vec::new())
 }
 
-fn single_field_condition(
-    column: &str,
-    value: &str,
-    exact: bool,
-    params: &mut Vec<String>,
-) -> String {
+fn single_field_condition(column: &str, value: &str, exact: bool, params: &mut Vec<String>) -> String {
     params.push(match_parameter(value, exact));
     format!("{column} LIKE ?{}", params.len())
 }
@@ -3681,15 +3436,15 @@ fn mapped_field_condition(
         (
             format!("{value_name}s2"),
             format!("{value_name}s2_map"),
-            value_name.to_string(),
-            "package".to_string(),
+            value_name.to_owned(),
+            "package".to_owned(),
         )
     } else {
         (
             format!("{value_name}s"),
             format!("{value_name}s_map"),
-            value_name.to_string(),
-            "manifest".to_string(),
+            value_name.to_owned(),
+            "manifest".to_owned(),
         )
     };
     params.push(match_parameter(value, exact));
@@ -3703,11 +3458,7 @@ fn mapped_field_condition(
 }
 
 fn match_parameter(value: &str, exact: bool) -> String {
-    if exact {
-        value.to_string()
-    } else {
-        format!("%{value}%")
-    }
+    if exact { value.to_owned() } else { format!("%{value}%") }
 }
 
 fn build_rest_search_body(
@@ -3717,7 +3468,7 @@ fn build_rest_search_body(
 ) -> Result<JsonValue> {
     let mut root = serde_json::Map::new();
     root.insert(
-        "MaximumResults".to_string(),
+        "MaximumResults".to_owned(),
         JsonValue::from(source_fetch_results(query, semantics) as u64),
     );
     let exact_match = query.exact || semantics == SearchSemantics::Single;
@@ -3730,12 +3481,12 @@ fn build_rest_search_body(
                 rest_filter("Moniker", value, true),
             ];
             append_required_rest_filters(&mut filters, info);
-            root.insert("Filters".to_string(), JsonValue::Array(filters));
+            root.insert("Filters".to_owned(), JsonValue::Array(filters));
             return Ok(JsonValue::Object(root));
         }
 
         root.insert(
-            "Query".to_string(),
+            "Query".to_owned(),
             serde_json::json!({
                 "KeyWord": value,
                 "MatchType": if exact_match { "Exact" } else { "Substring" },
@@ -3762,7 +3513,7 @@ fn build_rest_search_body(
     append_required_rest_filters(&mut filters, info);
 
     if !filters.is_empty() {
-        root.insert("Filters".to_string(), JsonValue::Array(filters));
+        root.insert("Filters".to_owned(), JsonValue::Array(filters));
     }
 
     Ok(JsonValue::Object(root))
@@ -3893,10 +3644,7 @@ where
         return Ok(Some(format_match_criteria("Command", value)));
     }
     if let Some(value) = &query.moniker {
-        return Ok(Some(format_match_criteria(
-            "Moniker",
-            moniker.unwrap_or(value),
-        )));
+        return Ok(Some(format_match_criteria("Moniker", moniker.unwrap_or(value))));
     }
     if semantics == SearchSemantics::Single {
         return Ok(None);
@@ -3905,9 +3653,7 @@ where
         if matches_text(id, value, query.exact) || matches_text(name, value, query.exact) {
             return Ok(None);
         }
-        if let Some(moniker_value) =
-            moniker.filter(|candidate| matches_text(candidate, value, query.exact))
-        {
+        if let Some(moniker_value) = moniker.filter(|candidate| matches_text(candidate, value, query.exact)) {
             return Ok(Some(format_match_criteria("Moniker", moniker_value)));
         }
         if let Some(tag) = find_tag(value)? {
@@ -3972,11 +3718,7 @@ fn find_mapped_value_v1(
     Ok(select_best_text_match(values, query, exact))
 }
 
-fn rest_match_criteria(
-    item: &JsonValue,
-    query: &PackageQuery,
-    semantics: SearchSemantics,
-) -> Option<String> {
+fn rest_match_criteria(item: &JsonValue, query: &PackageQuery, semantics: SearchSemantics) -> Option<String> {
     if let Some(value) = &query.tag {
         return Some(format_match_criteria("Tag", value));
     }
@@ -4012,9 +3754,7 @@ fn matches_text(candidate: &str, query: &str, exact: bool) -> bool {
     if exact {
         candidate.eq_ignore_ascii_case(query)
     } else {
-        candidate
-            .to_ascii_lowercase()
-            .contains(&query.to_ascii_lowercase())
+        candidate.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
     }
 }
 
@@ -4022,83 +3762,33 @@ fn search_match_sort_score(candidate: &SearchMatch, query: &PackageQuery) -> usi
     let mut score = 0;
 
     if let Some(value) = &query.query {
-        score = score.max(score_text_match(
-            &candidate.name,
-            value,
-            query.exact,
-            140,
-            50,
-            30,
-        ));
-        score = score.max(score_text_match(
-            &candidate.id,
-            value,
-            query.exact,
-            135,
-            45,
-            25,
-        ));
+        score = score.max(score_text_match(&candidate.name, value, query.exact, 140, 50, 30));
+        score = score.max(score_text_match(&candidate.id, value, query.exact, 135, 45, 25));
         if let Some(moniker) = candidate.moniker.as_deref() {
             score = score.max(score_text_match(moniker, value, query.exact, 130, 55, 35));
         }
     }
 
     if let Some(value) = &query.id {
-        score = score.max(score_text_match(
-            &candidate.id,
-            value,
-            query.exact,
-            220,
-            200,
-            180,
-        ));
+        score = score.max(score_text_match(&candidate.id, value, query.exact, 220, 200, 180));
     }
     if let Some(value) = &query.name {
-        score = score.max(score_text_match(
-            &candidate.name,
-            value,
-            query.exact,
-            210,
-            190,
-            170,
-        ));
+        score = score.max(score_text_match(&candidate.name, value, query.exact, 210, 190, 170));
     }
-    if let Some(value) = &query.moniker {
-        if let Some(moniker) = candidate.moniker.as_deref() {
-            score = score.max(score_text_match(moniker, value, query.exact, 205, 185, 165));
-        }
+    if let Some(value) = &query.moniker
+        && let Some(moniker) = candidate.moniker.as_deref()
+    {
+        score = score.max(score_text_match(moniker, value, query.exact, 205, 185, 165));
     }
-    if let Some(value) = &query.tag {
-        if let Some(("Tag", matched_value)) = candidate
-            .match_criteria
-            .as_deref()
-            .and_then(parse_match_criteria)
-        {
-            score = score.max(score_text_match(
-                matched_value,
-                value,
-                query.exact,
-                160,
-                150,
-                140,
-            ));
-        }
+    if let Some(value) = &query.tag
+        && let Some(("Tag", matched_value)) = candidate.match_criteria.as_deref().and_then(parse_match_criteria)
+    {
+        score = score.max(score_text_match(matched_value, value, query.exact, 160, 150, 140));
     }
-    if let Some(value) = &query.command {
-        if let Some(("Command", matched_value)) = candidate
-            .match_criteria
-            .as_deref()
-            .and_then(parse_match_criteria)
-        {
-            score = score.max(score_text_match(
-                matched_value,
-                value,
-                query.exact,
-                155,
-                145,
-                135,
-            ));
-        }
+    if let Some(value) = &query.command
+        && let Some(("Command", matched_value)) = candidate.match_criteria.as_deref().and_then(parse_match_criteria)
+    {
+        score = score.max(score_text_match(matched_value, value, query.exact, 155, 145, 135));
     }
 
     if matches!(candidate.source_kind, SourceKind::PreIndexed) {
@@ -4133,9 +3823,7 @@ fn resolve_manifest_path(manifest_path: &Path) -> Result<PathBuf> {
         .filter(|path| {
             path.extension()
                 .and_then(|value| value.to_str())
-                .is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
-                })
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
         })
         .min();
 
@@ -4182,11 +3870,7 @@ where
             left_score
                 .cmp(right_score)
                 .then_with(|| right_value.len().cmp(&left_value.len()))
-                .then_with(|| {
-                    right_value
-                        .to_ascii_lowercase()
-                        .cmp(&left_value.to_ascii_lowercase())
-                })
+                .then_with(|| right_value.to_ascii_lowercase().cmp(&left_value.to_ascii_lowercase()))
         })
         .map(|(_, candidate)| candidate)
 }
@@ -4218,11 +3902,8 @@ fn parse_yaml_manifest_bundle(bytes: &[u8]) -> Result<(Manifest, JsonValue)> {
     let mut merged = YamlMapping::new();
     let mut documents = Vec::new();
     for document in serde_yaml::Deserializer::from_slice(bytes) {
-        let value =
-            YamlValue::deserialize(document).context("failed to deserialize YAML document")?;
-        documents.push(
-            serde_json::to_value(&value).context("failed to convert YAML manifest document")?,
-        );
+        let value = YamlValue::deserialize(document).context("failed to deserialize YAML document")?;
+        documents.push(serde_json::to_value(&value).context("failed to convert YAML manifest document")?);
         if let Some(mapping) = value.as_mapping() {
             merge_yaml_mapping(&mut merged, mapping);
         }
@@ -4230,10 +3911,9 @@ fn parse_yaml_manifest_bundle(bytes: &[u8]) -> Result<(Manifest, JsonValue)> {
 
     let id = yaml_string_from_root(&merged, "PackageIdentifier")
         .ok_or_else(|| anyhow!("manifest missing PackageIdentifier"))?;
-    let version = yaml_string_from_root(&merged, "PackageVersion")
-        .ok_or_else(|| anyhow!("manifest missing PackageVersion"))?;
-    let name = yaml_localized_string(&merged, "PackageName")
-        .ok_or_else(|| anyhow!("manifest missing PackageName"))?;
+    let version =
+        yaml_string_from_root(&merged, "PackageVersion").ok_or_else(|| anyhow!("manifest missing PackageVersion"))?;
+    let name = yaml_localized_string(&merged, "PackageName").ok_or_else(|| anyhow!("manifest missing PackageName"))?;
 
     let installers = parse_yaml_installers(&merged);
 
@@ -4272,14 +3952,8 @@ fn parse_yaml_manifest(bytes: &[u8]) -> Result<Manifest> {
     parse_yaml_manifest_bundle(bytes).map(|(manifest, _)| manifest)
 }
 
-fn parse_rest_manifest(
-    bytes: &[u8],
-    package_id: &str,
-    version: &str,
-    channel: &str,
-) -> Result<(Manifest, JsonValue)> {
-    let root = serde_json::from_slice::<JsonValue>(bytes)
-        .context("failed to deserialize REST manifest JSON")?;
+fn parse_rest_manifest(bytes: &[u8], package_id: &str, version: &str, channel: &str) -> Result<(Manifest, JsonValue)> {
+    let root = serde_json::from_slice::<JsonValue>(bytes).context("failed to deserialize REST manifest JSON")?;
     let data = root
         .get("Data")
         .ok_or_else(|| anyhow!("REST manifest response missing Data"))?;
@@ -4332,8 +4006,7 @@ fn parse_rest_manifest(
                     release_date: json_string(item, "ReleaseDate"),
                     package_family_name: json_string(item, "PackageFamilyName"),
                     upgrade_code: json_string(item, "UpgradeCode"),
-                    switches: json_installer_switches(item)
-                        .with_fallback(&installer_switch_defaults),
+                    switches: json_installer_switches(item).with_fallback(&installer_switch_defaults),
                     commands: json_string_list(item, "Commands"),
                     package_dependencies: json_package_dependencies(item),
                 })
@@ -4342,10 +4015,10 @@ fn parse_rest_manifest(
         .unwrap_or_default();
 
     let manifest = Manifest {
-        id: package_id.to_string(),
+        id: package_id.to_owned(),
         name,
-        version: version.to_string(),
-        channel: channel.to_string(),
+        version: version.to_owned(),
+        channel: channel.to_owned(),
         publisher: json_string(default_locale, "Publisher"),
         description: json_string(default_locale, "Description")
             .or_else(|| json_string(default_locale, "ShortDescription")),
@@ -4376,9 +4049,7 @@ fn parse_rest_manifest(
 
 fn collapse_structured_document(document: &JsonValue) -> JsonValue {
     match document {
-        JsonValue::Array(documents)
-            if documents.len() == 1 && is_merged_manifest_document(&documents[0]) =>
-        {
+        JsonValue::Array(documents) if documents.len() == 1 && is_merged_manifest_document(&documents[0]) => {
             merge_manifest_documents(&split_merged_manifest_document(&documents[0]))
         }
         JsonValue::Array(documents) => merge_manifest_documents(documents),
@@ -4414,48 +4085,27 @@ fn merge_manifest_documents(documents: &[JsonValue]) -> JsonValue {
     });
 
     let mut singleton = JsonMap::new();
-    copy_manifest_keys(
-        &mut singleton,
-        version,
-        &["PackageIdentifier", "PackageVersion"],
-    );
-    copy_all_manifest_keys_except(
-        &mut singleton,
-        default_locale,
-        &["ManifestType", "ManifestVersion"],
-    );
-    copy_all_manifest_keys_except(
-        &mut singleton,
-        installer,
-        &["ManifestType", "ManifestVersion"],
-    );
+    copy_manifest_keys(&mut singleton, version, &["PackageIdentifier", "PackageVersion"]);
+    copy_all_manifest_keys_except(&mut singleton, default_locale, &["ManifestType", "ManifestVersion"]);
+    copy_all_manifest_keys_except(&mut singleton, installer, &["ManifestType", "ManifestVersion"]);
 
-    if !singleton.contains_key("PackageLocale") {
-        if let Some(package_locale) = default_locale
+    if !singleton.contains_key("PackageLocale")
+        && let Some(package_locale) = default_locale
             .and_then(|document| json_string(document, "PackageLocale"))
             .or_else(|| version.and_then(|document| json_string(document, "DefaultLocale")))
-        {
-            singleton.insert(
-                "PackageLocale".to_string(),
-                JsonValue::String(package_locale),
-            );
-        }
+    {
+        singleton.insert("PackageLocale".to_owned(), JsonValue::String(package_locale));
     }
 
+    singleton.insert("ManifestType".to_owned(), JsonValue::String("singleton".to_owned()));
     singleton.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("singleton".to_string()),
-    );
-    singleton.insert(
-        "ManifestVersion".to_string(),
+        "ManifestVersion".to_owned(),
         JsonValue::String(
             installer
                 .and_then(|document| json_string(document, "ManifestVersion"))
-                .or_else(|| {
-                    default_locale.and_then(|document| json_string(document, "ManifestVersion"))
-                })
+                .or_else(|| default_locale.and_then(|document| json_string(document, "ManifestVersion")))
                 .or_else(|| version.and_then(|document| json_string(document, "ManifestVersion")))
-                .unwrap_or_else(|| "1.10.0".to_string()),
+                .unwrap_or_else(|| "1.10.0".to_owned()),
         ),
     );
     singleton.remove("DefaultLocale");
@@ -4473,10 +4123,8 @@ fn is_merged_manifest_document(document: &JsonValue) -> bool {
 fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
     let package_identifier = json_string(merged, "PackageIdentifier").unwrap_or_default();
     let package_version = json_string(merged, "PackageVersion").unwrap_or_default();
-    let package_locale =
-        json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
-    let manifest_version =
-        json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string());
+    let package_locale = json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_owned());
+    let manifest_version = json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_owned());
 
     let version_document = serde_json::json!({
         "PackageIdentifier": package_identifier,
@@ -4517,28 +4165,21 @@ fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
         ],
     );
     default_locale_document.insert(
-        "PackageIdentifier".to_string(),
+        "PackageIdentifier".to_owned(),
         JsonValue::String(json_string(merged, "PackageIdentifier").unwrap_or_default()),
     );
     default_locale_document.insert(
-        "PackageVersion".to_string(),
+        "PackageVersion".to_owned(),
         JsonValue::String(json_string(merged, "PackageVersion").unwrap_or_default()),
     );
     default_locale_document.insert(
-        "PackageLocale".to_string(),
-        JsonValue::String(
-            json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_string()),
-        ),
+        "PackageLocale".to_owned(),
+        JsonValue::String(json_string(merged, "PackageLocale").unwrap_or_else(|| "en-US".to_owned())),
     );
+    default_locale_document.insert("ManifestType".to_owned(), JsonValue::String("defaultLocale".to_owned()));
     default_locale_document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("defaultLocale".to_string()),
-    );
-    default_locale_document.insert(
-        "ManifestVersion".to_string(),
-        JsonValue::String(
-            json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string()),
-        ),
+        "ManifestVersion".to_owned(),
+        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_owned())),
     );
 
     let mut installer_document = project_manifest_document(
@@ -4586,22 +4227,17 @@ fn split_merged_manifest_document(merged: &JsonValue) -> Vec<JsonValue> {
         ],
     );
     installer_document.insert(
-        "PackageIdentifier".to_string(),
+        "PackageIdentifier".to_owned(),
         JsonValue::String(json_string(merged, "PackageIdentifier").unwrap_or_default()),
     );
     installer_document.insert(
-        "PackageVersion".to_string(),
+        "PackageVersion".to_owned(),
         JsonValue::String(json_string(merged, "PackageVersion").unwrap_or_default()),
     );
+    installer_document.insert("ManifestType".to_owned(), JsonValue::String("installer".to_owned()));
     installer_document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("installer".to_string()),
-    );
-    installer_document.insert(
-        "ManifestVersion".to_string(),
-        JsonValue::String(
-            json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_string()),
-        ),
+        "ManifestVersion".to_owned(),
+        JsonValue::String(json_string(merged, "ManifestVersion").unwrap_or_else(|| "1.10.0".to_owned())),
     );
 
     vec![
@@ -4616,7 +4252,7 @@ fn project_manifest_document(source: &JsonValue, keys: &[&str]) -> JsonMap<Strin
     if let Some(source) = source.as_object() {
         for key in keys {
             if let Some(value) = source.get(*key) {
-                result.insert((*key).to_string(), value.clone());
+                result.insert((*key).to_owned(), value.clone());
             }
         }
     }
@@ -4624,15 +4260,11 @@ fn project_manifest_document(source: &JsonValue, keys: &[&str]) -> JsonMap<Strin
     result
 }
 
-fn copy_manifest_keys(
-    target: &mut JsonMap<String, JsonValue>,
-    source: Option<&JsonValue>,
-    keys: &[&str],
-) {
+fn copy_manifest_keys(target: &mut JsonMap<String, JsonValue>, source: Option<&JsonValue>, keys: &[&str]) {
     if let Some(source) = source.and_then(JsonValue::as_object) {
         for key in keys {
             if let Some(value) = source.get(*key) {
-                target.insert((*key).to_string(), value.clone());
+                target.insert((*key).to_owned(), value.clone());
             }
         }
     }
@@ -4645,10 +4277,7 @@ fn copy_all_manifest_keys_except(
 ) {
     if let Some(source) = source.and_then(JsonValue::as_object) {
         for (key, value) in source {
-            if !excluded_keys
-                .iter()
-                .any(|excluded| key.eq_ignore_ascii_case(excluded))
-            {
+            if !excluded_keys.iter().any(|excluded| key.eq_ignore_ascii_case(excluded)) {
                 target.insert(key.clone(), value.clone());
             }
         }
@@ -4663,90 +4292,49 @@ fn build_rest_manifest_documents(
     version: &str,
     channel: &str,
 ) -> JsonValue {
-    let package_identifier =
-        json_string(data, "PackageIdentifier").unwrap_or_else(|| package_id.to_string());
-    let package_locale =
-        json_string(default_locale, "PackageLocale").unwrap_or_else(|| "en-US".to_string());
+    let package_identifier = json_string(data, "PackageIdentifier").unwrap_or_else(|| package_id.to_owned());
+    let package_locale = json_string(default_locale, "PackageLocale").unwrap_or_else(|| "en-US".to_owned());
     let manifest_version = json_string(installer_source, "ManifestVersion")
         .or_else(|| json_string(default_locale, "ManifestVersion"))
         .or_else(|| json_string(data, "ManifestVersion"))
-        .unwrap_or_else(|| "1.10.0".to_string());
+        .unwrap_or_else(|| "1.10.0".to_owned());
 
     let mut version_document = JsonMap::new();
     version_document.insert(
-        "PackageIdentifier".to_string(),
+        "PackageIdentifier".to_owned(),
         JsonValue::String(package_identifier.clone()),
     );
+    version_document.insert("PackageVersion".to_owned(), JsonValue::String(version.to_owned()));
+    version_document.insert("DefaultLocale".to_owned(), JsonValue::String(package_locale.clone()));
+    version_document.insert("ManifestType".to_owned(), JsonValue::String("version".to_owned()));
     version_document.insert(
-        "PackageVersion".to_string(),
-        JsonValue::String(version.to_string()),
-    );
-    version_document.insert(
-        "DefaultLocale".to_string(),
-        JsonValue::String(package_locale.clone()),
-    );
-    version_document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("version".to_string()),
-    );
-    version_document.insert(
-        "ManifestVersion".to_string(),
+        "ManifestVersion".to_owned(),
         JsonValue::String(manifest_version.clone()),
     );
 
-    let mut default_locale_document = default_locale
-        .as_object()
-        .cloned()
-        .unwrap_or_else(JsonMap::new);
+    let mut default_locale_document = default_locale.as_object().cloned().unwrap_or_else(JsonMap::new);
     default_locale_document.insert(
-        "PackageIdentifier".to_string(),
+        "PackageIdentifier".to_owned(),
         JsonValue::String(package_identifier.clone()),
     );
+    default_locale_document.insert("PackageVersion".to_owned(), JsonValue::String(version.to_owned()));
+    default_locale_document.insert("PackageLocale".to_owned(), JsonValue::String(package_locale));
+    default_locale_document.insert("ManifestType".to_owned(), JsonValue::String("defaultLocale".to_owned()));
     default_locale_document.insert(
-        "PackageVersion".to_string(),
-        JsonValue::String(version.to_string()),
-    );
-    default_locale_document.insert(
-        "PackageLocale".to_string(),
-        JsonValue::String(package_locale),
-    );
-    default_locale_document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("defaultLocale".to_string()),
-    );
-    default_locale_document.insert(
-        "ManifestVersion".to_string(),
+        "ManifestVersion".to_owned(),
         JsonValue::String(manifest_version.clone()),
     );
 
-    let mut installer_document = installer_source
-        .as_object()
-        .cloned()
-        .unwrap_or_else(JsonMap::new);
+    let mut installer_document = installer_source.as_object().cloned().unwrap_or_else(JsonMap::new);
     installer_document.remove("DefaultLocale");
     installer_document.remove("Locales");
-    installer_document.insert(
-        "PackageIdentifier".to_string(),
-        JsonValue::String(package_identifier.clone()),
-    );
-    installer_document.insert(
-        "PackageVersion".to_string(),
-        JsonValue::String(version.to_string()),
-    );
+    installer_document.insert("PackageIdentifier".to_owned(), JsonValue::String(package_identifier));
+    installer_document.insert("PackageVersion".to_owned(), JsonValue::String(version.to_owned()));
     if !channel.is_empty() {
-        installer_document.insert(
-            "Channel".to_string(),
-            JsonValue::String(channel.to_string()),
-        );
+        installer_document.insert("Channel".to_owned(), JsonValue::String(channel.to_owned()));
     }
-    installer_document.insert(
-        "ManifestType".to_string(),
-        JsonValue::String("installer".to_string()),
-    );
-    installer_document.insert(
-        "ManifestVersion".to_string(),
-        JsonValue::String(manifest_version.clone()),
-    );
+    installer_document.insert("ManifestType".to_owned(), JsonValue::String("installer".to_owned()));
+    installer_document.insert("ManifestVersion".to_owned(), JsonValue::String(manifest_version));
 
     let documents = vec![
         JsonValue::Object(version_document),
@@ -4760,10 +4348,7 @@ fn build_rest_manifest_documents(
 fn parse_yaml_installers(root: &YamlMapping) -> Vec<Installer> {
     let base = installer_defaults(root);
     let base_switches = yaml_installer_switches(root);
-    if let Some(items) = root
-        .get(YamlValue::from("Installers"))
-        .and_then(YamlValue::as_sequence)
-    {
+    if let Some(items) = root.get(YamlValue::from("Installers")).and_then(YamlValue::as_sequence) {
         let installers = items
             .iter()
             .filter_map(YamlValue::as_mapping)
@@ -4840,13 +4425,7 @@ fn yaml_installer_switches(root: &YamlMapping) -> InstallerSwitches {
 }
 
 fn yaml_installer_switches_from_mapping(mapping: Option<&YamlMapping>) -> InstallerSwitches {
-    let string = |key: &str| {
-        mapping.and_then(|mapping| {
-            mapping
-                .get(YamlValue::from(key))
-                .and_then(yaml_scalar_string)
-        })
-    };
+    let string = |key: &str| mapping.and_then(|mapping| mapping.get(YamlValue::from(key)).and_then(yaml_scalar_string));
 
     InstallerSwitches {
         silent: string("Silent"),
@@ -4888,13 +4467,7 @@ fn yaml_scalar_string(value: &YamlValue) -> Option<String> {
 fn yaml_string_list(root: &YamlMapping, key: &str) -> Vec<String> {
     root.get(YamlValue::from(key))
         .and_then(YamlValue::as_sequence)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(YamlValue::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(YamlValue::as_str).map(str::to_string).collect())
         .unwrap_or_default()
 }
 
@@ -4950,23 +4523,14 @@ fn yaml_package_dependencies(root: &YamlMapping) -> Vec<String> {
 }
 
 fn json_string(value: &JsonValue, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(JsonValue::as_str)
-        .map(str::to_string)
+    value.get(key).and_then(JsonValue::as_str).map(str::to_string)
 }
 
 fn json_string_list(value: &JsonValue, key: &str) -> Vec<String> {
     value
         .get(key)
         .and_then(JsonValue::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(JsonValue::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(JsonValue::as_str).map(str::to_string).collect())
         .unwrap_or_default()
 }
 
@@ -5063,18 +4627,14 @@ fn extract_zip_member(bytes: &[u8], member_name: &str) -> Result<Vec<u8>> {
 }
 
 fn decompress_mszyml(bytes: &[u8]) -> Result<String> {
-    if let Ok(output) = decompress_mszyml_payload(if bytes.starts_with(b"CK") {
-        &bytes[2..]
-    } else {
-        bytes
-    }) {
+    if let Ok(output) = decompress_mszyml_payload(if bytes.starts_with(b"CK") { &bytes[2..] } else { bytes }) {
         return Ok(output);
     }
 
-    if !bytes.starts_with(b"CK") {
-        if let Some(offset) = bytes.windows(2).position(|window| window == b"CK") {
-            return decompress_mszyml_payload(&bytes[offset + 2..]);
-        }
+    if !bytes.starts_with(b"CK")
+        && let Some(offset) = bytes.windows(2).position(|window| window == b"CK")
+    {
+        return decompress_mszyml_payload(&bytes[offset + 2..]);
     }
 
     decompress_mszyml_payload(bytes).context("failed to decompress MSZIP payload")
@@ -5116,13 +4676,13 @@ fn choose_contract(server_versions: &[String]) -> Option<&'static str> {
 fn major_minor(version: &str) -> (String, String) {
     let mut parts = version.split('.');
     (
-        parts.next().unwrap_or_default().to_string(),
-        parts.next().unwrap_or_default().to_string(),
+        parts.next().unwrap_or_default().to_owned(),
+        parts.next().unwrap_or_default().to_owned(),
     )
 }
 
 fn default_market() -> String {
-    std::env::var("WINGET_RS_MARKET").unwrap_or_else(|_| DEFAULT_MARKET.to_string())
+    std::env::var("WINGET_RS_MARKET").unwrap_or_else(|_| DEFAULT_MARKET.to_owned())
 }
 
 fn select_installer(installers: &[Installer], query: &PackageQuery) -> Option<Installer> {
@@ -5150,17 +4710,10 @@ fn select_installer(installers: &[Installer], query: &PackageQuery) -> Option<In
                 current_os_version.as_deref(),
             )
         })
-        .filter(|(_, installer)| {
-            installer_matches_architecture(installer, requested_architecture, system_architecture)
-        })
+        .filter(|(_, installer)| installer_matches_architecture(installer, requested_architecture, system_architecture))
         .max_by_key(|(index, installer)| {
             (
-                installer_rank(
-                    installer,
-                    requested_locale,
-                    requested_architecture,
-                    system_architecture,
-                ),
+                installer_rank(installer, requested_locale, requested_architecture, system_architecture),
                 std::cmp::Reverse(*index),
             )
         })
@@ -5283,7 +4836,8 @@ fn architecture_rank(
         .iter()
         .rev()
         .position(|candidate| value.eq_ignore_ascii_case(candidate))
-        .map(|index| index as i32 + 1)
+        .and_then(|index| i32::try_from(index).ok())
+        .and_then(|index| index.checked_add(1))
         .unwrap_or(-1)
 }
 
@@ -5332,19 +4886,13 @@ fn current_architecture() -> &'static str {
 }
 
 fn current_platform() -> Option<&'static str> {
-    if cfg!(windows) {
-        Some("Windows.Desktop")
-    } else {
-        None
-    }
+    if cfg!(windows) { Some("Windows.Desktop") } else { None }
 }
 
 #[cfg(windows)]
 fn current_os_version() -> Option<String> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm
-        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-        .ok()?;
+    let key = hklm.open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion").ok()?;
     let build: String = key.get_value("CurrentBuildNumber").ok()?;
     let ubr: u32 = key.get_value("UBR").unwrap_or(0);
     let major: u32 = key.get_value("CurrentMajorVersionNumber").unwrap_or(10);
@@ -5366,11 +4914,7 @@ fn parse_dotted_version(version: &str) -> Option<Vec<u64>> {
         parsed.push(component.parse().ok()?);
     }
 
-    if parsed.is_empty() {
-        None
-    } else {
-        Some(parsed)
-    }
+    if parsed.is_empty() { None } else { Some(parsed) }
 }
 
 fn select_v1_version(
@@ -5438,9 +4982,7 @@ fn select_rest_version<'a>(
             .ok_or_else(|| anyhow!("requested version {version} was not found"));
     }
 
-    versions
-        .first()
-        .ok_or_else(|| anyhow!("package had no REST versions"))
+    versions.first().ok_or_else(|| anyhow!("package had no REST versions"))
 }
 
 fn sort_versions_desc(versions: &mut [VersionKey]) {
@@ -5470,17 +5012,12 @@ fn compare_version(left: &str, right: &str) -> Ordering {
     for index in 0..max_len {
         let left_part = left_parts.get(index).map(String::as_str).unwrap_or("0");
         let right_part = right_parts.get(index).map(String::as_str).unwrap_or("0");
-        let numeric = left_part
-            .parse::<u64>()
-            .ok()
-            .zip(right_part.parse::<u64>().ok());
+        let numeric = left_part.parse::<u64>().ok().zip(right_part.parse::<u64>().ok());
 
         let ordering = if let Some((left_number, right_number)) = numeric {
             left_number.cmp(&right_number)
         } else {
-            left_part
-                .to_ascii_lowercase()
-                .cmp(&right_part.to_ascii_lowercase())
+            left_part.to_ascii_lowercase().cmp(&right_part.to_ascii_lowercase())
         };
 
         if ordering != Ordering::Equal {
@@ -5534,11 +5071,7 @@ fn verify_hash(expected_hash: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn verify_installer_hash(
-    expected_hash: Option<&str>,
-    bytes: &[u8],
-    ignore_security_hash: bool,
-) -> Result<()> {
+fn verify_installer_hash(expected_hash: Option<&str>, bytes: &[u8], ignore_security_hash: bool) -> Result<()> {
     let Some(expected_hash) = expected_hash else {
         return Ok(());
     };
@@ -5599,10 +5132,9 @@ fn dispatch_installer(
         }
         "msix" | "appx" => {
             let mut cmd = Command::new("powershell");
-            cmd.arg("-NoProfile").arg("-Command").arg(format!(
-                "Add-AppxPackage -Path '{}'",
-                installer_path.display()
-            ));
+            cmd.arg("-NoProfile")
+                .arg("-Command")
+                .arg(format!("Add-AppxPackage -Path '{}'", installer_path.display()));
             let status = cmd.status().context("failed to run Add-AppxPackage")?;
             Ok(status.code().unwrap_or(-1))
         }
@@ -5612,7 +5144,7 @@ fn dispatch_installer(
                 .join("Programs");
             fs::create_dir_all(&target)?;
             let file = fs::File::open(installer_path)?;
-            let mut archive = zip::ZipArchive::new(file)?;
+            let mut archive = ZipArchive::new(file)?;
             archive.extract(&target)?;
             Ok(0)
         }
@@ -5658,7 +5190,7 @@ fn installer_command_arguments(
     let mut args = Vec::new();
     match installer_type {
         "msi" | "wix" => {
-            args.push("/i".to_string());
+            args.push("/i".to_owned());
             args.push(installer_path.display().to_string());
         }
         "msix" | "appx" | "zip" => return Vec::new(),
@@ -5690,10 +5222,7 @@ fn installer_command_arguments(
         resolve_template_switch(
             installer.switches.log.as_deref(),
             default_log_switch(installer_type),
-            request
-                .log_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            request.log_path.as_ref().map(|path| path.display().to_string()),
             "<LOGPATH>",
         ),
     );
@@ -5717,25 +5246,25 @@ fn default_installer_arguments(installer_type: &str, mode: InstallerMode) -> Vec
         InstallerMode::Interactive => Vec::new(),
         InstallerMode::SilentWithProgress => match installer_type {
             "inno" => vec![
-                "/SP-".to_string(),
-                "/SILENT".to_string(),
-                "/SUPPRESSMSGBOXES".to_string(),
-                "/NORESTART".to_string(),
+                "/SP-".to_owned(),
+                "/SILENT".to_owned(),
+                "/SUPPRESSMSGBOXES".to_owned(),
+                "/NORESTART".to_owned(),
             ],
-            "burn" | "wix" | "msi" => vec!["/passive".to_string(), "/norestart".to_string()],
-            "nullsoft" | "nsis" => vec!["/S".to_string()],
-            _ => vec!["/SILENT".to_string()],
+            "burn" | "wix" | "msi" => vec!["/passive".to_owned(), "/norestart".to_owned()],
+            "nullsoft" | "nsis" => vec!["/S".to_owned()],
+            _ => vec!["/SILENT".to_owned()],
         },
         InstallerMode::Silent => match installer_type {
             "inno" => vec![
-                "/SP-".to_string(),
-                "/VERYSILENT".to_string(),
-                "/SUPPRESSMSGBOXES".to_string(),
-                "/NORESTART".to_string(),
+                "/SP-".to_owned(),
+                "/VERYSILENT".to_owned(),
+                "/SUPPRESSMSGBOXES".to_owned(),
+                "/NORESTART".to_owned(),
             ],
-            "burn" | "wix" | "msi" => vec!["/quiet".to_string(), "/norestart".to_string()],
-            "nullsoft" | "nsis" => vec!["/S".to_string()],
-            _ => vec!["/S".to_string()],
+            "burn" | "wix" | "msi" => vec!["/quiet".to_owned(), "/norestart".to_owned()],
+            "nullsoft" | "nsis" => vec!["/S".to_owned()],
+            _ => vec!["/S".to_owned()],
         },
     }
 }
@@ -5766,9 +5295,7 @@ fn resolve_template_switch(
     replacement: Option<String>,
     token: &str,
 ) -> Option<String> {
-    let template = manifest_value
-        .filter(|value| !value.trim().is_empty())
-        .or(fallback)?;
+    let template = manifest_value.filter(|value| !value.trim().is_empty()).or(fallback)?;
     let replacement = replacement?;
     Some(template.replace(token, &replacement))
 }
@@ -5842,8 +5369,8 @@ fn uninstall_package(installed: &ListMatch, request: &UninstallRequest) -> Resul
 fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Result<Option<i32>> {
     use std::process::Command;
 
-    let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
     let arp_paths = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -5855,8 +5382,7 @@ fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Resul
             if let Ok(key) = root.open_subkey(arp_path) {
                 for subkey_name in key.enum_keys().filter_map(|k| k.ok()) {
                     if let Ok(subkey) = key.open_subkey(&subkey_name) {
-                        let display_name: String =
-                            subkey.get_value("DisplayName").unwrap_or_default();
+                        let display_name: String = subkey.get_value("DisplayName").unwrap_or_default();
                         let product_code = subkey.get_value::<String, _>("ProductCode").ok();
                         if !registry_entry_matches_installed_package(
                             &subkey_name,
@@ -5867,17 +5393,13 @@ fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Resul
                             continue;
                         }
 
-                        if let Some(exit_code) = try_run_msi_uninstall(
-                            installed,
-                            &subkey_name,
-                            product_code.as_deref(),
-                            request,
-                        )? {
+                        if let Some(exit_code) =
+                            try_run_msi_uninstall(installed, &subkey_name, product_code.as_deref(), request)?
+                        {
                             return Ok(Some(exit_code));
                         }
 
-                        let quiet_uninstall_cmd =
-                            subkey.get_value::<String, _>("QuietUninstallString").ok();
+                        let quiet_uninstall_cmd = subkey.get_value::<String, _>("QuietUninstallString").ok();
                         let uninstall_cmd: String = if request.mode == InstallerMode::Interactive {
                             subkey.get_value("UninstallString").ok()
                         } else {
@@ -5888,10 +5410,7 @@ fn try_uninstall_arp(installed: &ListMatch, request: &UninstallRequest) -> Resul
                         .context("No uninstall command found in registry")?;
 
                         let mut cmd = Command::new("cmd");
-                        let log_path = request
-                            .log_path
-                            .as_ref()
-                            .map(|value| value.display().to_string());
+                        let log_path = request.log_path.as_ref().map(|value| value.display().to_string());
                         cmd.arg("/C").arg(build_uninstall_command_with_mode(
                             &uninstall_cmd,
                             request.mode,
@@ -5919,12 +5438,10 @@ fn try_uninstall_msix(installed: &ListMatch) -> Result<Option<i32>> {
 
     let package_full_name = installed.local_id.strip_prefix("MSIX\\");
     let mut cmd = Command::new("powershell");
-    cmd.arg("-NoProfile")
-        .arg("-Command")
-        .arg(build_msix_uninstall_script(
-            package_full_name,
-            &installed.package_family_names,
-        ));
+    cmd.arg("-NoProfile").arg("-Command").arg(build_msix_uninstall_script(
+        package_full_name,
+        &installed.package_family_names,
+    ));
     let status = cmd.status().context("failed to run Remove-AppxPackage")?;
     Ok(Some(status.code().unwrap_or(-1)))
 }
@@ -5941,10 +5458,10 @@ fn registry_entry_matches_installed_package(
     product_code: Option<&str>,
     installed: &ListMatch,
 ) -> bool {
-    if let Some(arp_subkey_name) = arp_subkey_name(&installed.local_id) {
-        if subkey_name.eq_ignore_ascii_case(arp_subkey_name) {
-            return true;
-        }
+    if let Some(arp_subkey_name) = arp_subkey_name(&installed.local_id)
+        && subkey_name.eq_ignore_ascii_case(arp_subkey_name)
+    {
+        return true;
     }
 
     if installed.product_codes.iter().any(|code| {
@@ -5982,7 +5499,7 @@ fn build_uninstall_command_with_mode(
 ) -> String {
     let uninstall_cmd = log_path
         .map(|value| uninstall_cmd.replace("<LOGPATH>", value))
-        .unwrap_or_else(|| uninstall_cmd.to_string());
+        .unwrap_or_else(|| uninstall_cmd.to_owned());
     if mode == InstallerMode::Interactive || has_quiet_command {
         return uninstall_cmd;
     }
@@ -5994,22 +5511,19 @@ fn build_uninstall_command_with_mode(
         || lower.contains("/silent")
         || lower.contains(" /s")
     {
-        return uninstall_cmd.to_string();
+        return uninstall_cmd;
     }
 
     format!("{uninstall_cmd} /S")
 }
 
 #[cfg(windows)]
-fn build_msix_uninstall_script(
-    package_full_name: Option<&str>,
-    package_family_names: &[String],
-) -> String {
+fn build_msix_uninstall_script(package_full_name: Option<&str>, package_family_names: &[String]) -> String {
     let full_name_literal = package_full_name
         .map(|value| format!("'{}'", value.replace('\'', "''")))
-        .unwrap_or_else(|| "$null".to_string());
+        .unwrap_or_else(|| "$null".to_owned());
     let family_names_literal = if package_family_names.is_empty() {
-        "@()".to_string()
+        "@()".to_owned()
     } else {
         format!(
             "@({})",
@@ -6116,11 +5630,13 @@ fn uninstall_package(_installed: &ListMatch, _request: &UninstallRequest) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use flate2::Compression;
-    use flate2::write::DeflateEncoder;
     use std::io::Write;
     use std::path::{Path, PathBuf};
+
+    use flate2::Compression;
+    use flate2::write::DeflateEncoder;
+
+    use super::*;
 
     fn temp_app_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -6131,8 +5647,8 @@ mod tests {
 
     #[test]
     fn repository_options_capture_custom_host_settings() {
-        let options = RepositoryOptions::new(PathBuf::from(r"C:\temp\pinget-test"))
-            .with_user_agent("pinget-rs-tests/1.0");
+        let options =
+            RepositoryOptions::new(PathBuf::from(r"C:\temp\pinget-test")).with_user_agent("pinget-rs-tests/1.0");
 
         assert_eq!(options.app_root, PathBuf::from(r"C:\temp\pinget-test"));
         assert_eq!(options.user_agent, "pinget-rs-tests/1.0");
@@ -6142,11 +5658,11 @@ mod tests {
     fn storage_paths_use_configured_app_root() {
         let app_root = PathBuf::from(r"C:\temp\pinget-test");
         let source = SourceRecord {
-            name: "winget/test".to_string(),
+            name: "winget/test".to_owned(),
             kind: SourceKind::PreIndexed,
-            arg: "https://example.com/cache".to_string(),
-            identifier: "Test.Source".to_string(),
-            trust_level: "None".to_string(),
+            arg: "https://example.com/cache".to_owned(),
+            identifier: "Test.Source".to_owned(),
+            trust_level: "None".to_owned(),
             explicit: false,
             priority: 0,
             last_update: None,
@@ -6165,8 +5681,7 @@ mod tests {
     fn source_metadata_and_named_reset_round_trip() {
         let app_root = temp_app_root("source-reset");
         let result = (|| -> Result<()> {
-            let mut repository =
-                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            let mut repository = Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
             repository.add_source_with_metadata(
                 "test",
                 "https://example.com/test",
@@ -6208,8 +5723,7 @@ mod tests {
     fn explicit_sources_are_skipped_by_default_search_resolution() {
         let app_root = temp_app_root("source-resolution");
         let result = (|| -> Result<()> {
-            let mut repository =
-                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            let mut repository = Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
             repository.add_source_with_metadata(
                 "explicit-test",
                 "https://example.com/explicit",
@@ -6236,8 +5750,7 @@ mod tests {
     fn user_and_admin_settings_round_trip() {
         let app_root = temp_app_root("settings");
         let result = (|| -> Result<()> {
-            let repository =
-                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            let repository = Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
             repository.set_user_settings(
                 &serde_json::json!({
                     "visual": {
@@ -6258,7 +5771,7 @@ mod tests {
             let user_settings = repository.get_user_settings()?;
             assert_eq!(
                 user_settings["visual"]["progressBar"],
-                serde_json::Value::String("retro".to_string())
+                serde_json::Value::String("retro".to_owned())
             );
             assert_eq!(
                 user_settings["experimentalFeatures"]["directMSI"],
@@ -6276,21 +5789,12 @@ mod tests {
             repository.set_admin_setting("LocalManifestFiles", true)?;
             repository.set_admin_setting("InstallerHashOverride", true)?;
             let admin_settings = repository.get_admin_settings()?;
-            assert_eq!(
-                admin_settings["LocalManifestFiles"],
-                serde_json::Value::Bool(true)
-            );
-            assert_eq!(
-                admin_settings["InstallerHashOverride"],
-                serde_json::Value::Bool(true)
-            );
+            assert_eq!(admin_settings["LocalManifestFiles"], serde_json::Value::Bool(true));
+            assert_eq!(admin_settings["InstallerHashOverride"], serde_json::Value::Bool(true));
 
             repository.reset_admin_setting(Some("LocalManifestFiles"), false)?;
             let reset_one = repository.get_admin_settings()?;
-            assert_eq!(
-                reset_one["LocalManifestFiles"],
-                serde_json::Value::Bool(false)
-            );
+            assert_eq!(reset_one["LocalManifestFiles"], serde_json::Value::Bool(false));
 
             repository.reset_admin_setting(None, true)?;
             let reset_all = repository.get_admin_settings()?;
@@ -6308,23 +5812,23 @@ mod tests {
     fn show_result_structured_document_is_manifest_oriented() {
         let result = ShowResult {
             package: SearchMatch {
-                source_name: "winget".to_string(),
+                source_name: "winget".to_owned(),
                 source_kind: SourceKind::PreIndexed,
-                id: "Test.Package".to_string(),
-                name: "Test Package".to_string(),
-                moniker: Some("testpkg".to_string()),
-                version: Some("1.2.3".to_string()),
-                channel: Some("stable".to_string()),
-                match_criteria: Some("Id".to_string()),
+                id: "Test.Package".to_owned(),
+                name: "Test Package".to_owned(),
+                moniker: Some("testpkg".to_owned()),
+                version: Some("1.2.3".to_owned()),
+                channel: Some("stable".to_owned()),
+                match_criteria: Some("Id".to_owned()),
             },
             manifest: Manifest {
-                id: "Test.Package".to_string(),
-                name: "Test Package".to_string(),
-                version: "1.2.3".to_string(),
-                channel: "stable".to_string(),
-                publisher: Some("Contoso".to_string()),
-                description: Some("Structured output".to_string()),
-                moniker: Some("testpkg".to_string()),
+                id: "Test.Package".to_owned(),
+                name: "Test Package".to_owned(),
+                version: "1.2.3".to_owned(),
+                channel: "stable".to_owned(),
+                publisher: Some("Contoso".to_owned()),
+                description: Some("Structured output".to_owned()),
+                moniker: Some("testpkg".to_owned()),
                 package_url: None,
                 publisher_url: None,
                 publisher_support_url: None,
@@ -6336,56 +5840,56 @@ mod tests {
                 copyright_url: None,
                 release_notes: None,
                 release_notes_url: None,
-                tags: vec!["utility".to_string()],
+                tags: vec!["utility".to_owned()],
                 agreements: Vec::new(),
-                package_dependencies: vec!["Microsoft.VCRedist.2015+.x64".to_string()],
+                package_dependencies: vec!["Microsoft.VCRedist.2015+.x64".to_owned()],
                 documentation: vec![Documentation {
-                    label: Some("Docs".to_string()),
-                    url: "https://example.test/docs".to_string(),
+                    label: Some("Docs".to_owned()),
+                    url: "https://example.test/docs".to_owned(),
                 }],
                 installers: vec![Installer {
-                    architecture: Some("x64".to_string()),
-                    installer_type: Some("msix".to_string()),
-                    url: Some("https://example.test/Test.Package.msix".to_string()),
-                    sha256: Some("ABC123".to_string()),
+                    architecture: Some("x64".to_owned()),
+                    installer_type: Some("msix".to_owned()),
+                    url: Some("https://example.test/Test.Package.msix".to_owned()),
+                    sha256: Some("ABC123".to_owned()),
                     product_code: None,
-                    locale: Some("en-US".to_string()),
-                    scope: Some("machine".to_string()),
+                    locale: Some("en-US".to_owned()),
+                    scope: Some("machine".to_owned()),
                     release_date: None,
                     package_family_name: None,
                     upgrade_code: None,
                     platforms: Vec::new(),
                     minimum_os_version: None,
                     switches: InstallerSwitches {
-                        silent: Some("/quiet".to_string()),
+                        silent: Some("/quiet".to_owned()),
                         ..InstallerSwitches::default()
                     },
-                    commands: vec!["testpkg".to_string()],
-                    package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
+                    commands: vec!["testpkg".to_owned()],
+                    package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_owned()],
                 }],
             },
             selected_installer: Some(Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("msix".to_string()),
-                url: Some("https://example.test/Test.Package.msix".to_string()),
-                sha256: Some("ABC123".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("msix".to_owned()),
+                url: Some("https://example.test/Test.Package.msix".to_owned()),
+                sha256: Some("ABC123".to_owned()),
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("machine".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("machine".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
                 platforms: Vec::new(),
                 minimum_os_version: None,
                 switches: InstallerSwitches {
-                    silent: Some("/quiet".to_string()),
+                    silent: Some("/quiet".to_owned()),
                     ..InstallerSwitches::default()
                 },
-                commands: vec!["testpkg".to_string()],
-                package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_string()],
+                commands: vec!["testpkg".to_owned()],
+                package_dependencies: vec!["Microsoft.UI.Xaml.2.8".to_owned()],
             }),
             cached_files: vec![PathBuf::from(r"C:\temp\cache\Test.Package.yaml")],
-            warnings: vec!["cache warmed".to_string()],
+            warnings: vec!["cache warmed".to_owned()],
             manifest_documents: JsonValue::Array(vec![
                 serde_json::json!({
                     "PackageIdentifier": "Test.Package",
@@ -6435,14 +5939,10 @@ mod tests {
         assert_eq!(document["ManifestVersion"].as_str(), Some("1.10.0"));
         assert_eq!(document["PackageLocale"].as_str(), Some("en-US"));
         assert_eq!(
-            document["Installers"][0]["Dependencies"]["PackageDependencies"][0]["PackageIdentifier"]
-                .as_str(),
+            document["Installers"][0]["Dependencies"]["PackageDependencies"][0]["PackageIdentifier"].as_str(),
             Some("Microsoft.VCRedist.2015+.x64")
         );
-        assert_eq!(
-            document["Installers"][0]["Commands"][0].as_str(),
-            Some("testpkg")
-        );
+        assert_eq!(document["Installers"][0]["Commands"][0].as_str(), Some("testpkg"));
         assert_eq!(
             document["Installers"][0]["InstallerSwitches"]["Silent"].as_str(),
             Some("/quiet")
@@ -6482,10 +5982,7 @@ Installers:
         let (_manifest, documents) = parse_yaml_manifest_bundle(yaml.as_bytes()).expect("bundle");
 
         assert_eq!(documents["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(
-            documents["PackageIdentifier"].as_str(),
-            Some("Test.Package")
-        );
+        assert_eq!(documents["PackageIdentifier"].as_str(), Some("Test.Package"));
         assert_eq!(documents["PackageName"].as_str(), Some("Test Package"));
     }
 
@@ -6535,51 +6032,34 @@ Installers:
 
         assert_eq!(documents.len(), 2);
         assert_eq!(documents[0]["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(
-            documents[0]["PackageIdentifier"].as_str(),
-            Some("Test.Package.One")
-        );
-        assert_eq!(
-            documents[0]["PackageName"].as_str(),
-            Some("Test Package One")
-        );
+        assert_eq!(documents[0]["PackageIdentifier"].as_str(), Some("Test.Package.One"));
+        assert_eq!(documents[0]["PackageName"].as_str(), Some("Test Package One"));
         assert_eq!(documents[1]["ManifestType"].as_str(), Some("singleton"));
-        assert_eq!(
-            documents[1]["PackageIdentifier"].as_str(),
-            Some("Test.Package.Two")
-        );
+        assert_eq!(documents[1]["PackageIdentifier"].as_str(), Some("Test.Package.Two"));
     }
 
     #[test]
     fn unsupported_action_result_marks_noop_and_warning() {
-        let result = unsupported_action_result(
-            "Contoso.App",
-            "1.2.3",
-            "install",
-            INSTALL_UNSUPPORTED_WARNING,
-        );
+        let result = unsupported_action_result("Contoso.App", "1.2.3", "install", INSTALL_UNSUPPORTED_WARNING);
 
         assert!(result.success);
         assert!(result.no_op);
         assert_eq!(result.exit_code, 0);
-        assert_eq!(
-            result.warnings,
-            vec![INSTALL_UNSUPPORTED_WARNING.to_string()]
-        );
+        assert_eq!(result.warnings, vec![INSTALL_UNSUPPORTED_WARNING.to_owned()]);
     }
 
     #[test]
     fn create_install_no_op_result_honors_no_upgrade() {
         let mut request = InstallRequest::new(PackageQuery {
-            id: Some("Contoso.App".to_string()),
+            id: Some("Contoso.App".to_owned()),
             ..PackageQuery::default()
         });
         request.no_upgrade = true;
 
         let manifest = Manifest {
-            id: "Contoso.App".to_string(),
-            name: "Contoso App".to_string(),
-            version: "2.0.0".to_string(),
+            id: "Contoso.App".to_owned(),
+            name: "Contoso App".to_owned(),
+            version: "2.0.0".to_owned(),
             channel: String::new(),
             publisher: None,
             description: None,
@@ -6602,12 +6082,12 @@ Installers:
             installers: Vec::new(),
         };
         let existing = ListMatch {
-            name: "Contoso App".to_string(),
-            id: "Contoso.App".to_string(),
-            local_id: "Contoso.App".to_string(),
-            installed_version: "1.0.0".to_string(),
-            available_version: Some("2.0.0".to_string()),
-            source_name: Some("winget".to_string()),
+            name: "Contoso App".to_owned(),
+            id: "Contoso.App".to_owned(),
+            local_id: "Contoso.App".to_owned(),
+            installed_version: "1.0.0".to_owned(),
+            available_version: Some("2.0.0".to_owned()),
+            source_name: Some("winget".to_owned()),
             publisher: None,
             scope: None,
             installer_category: None,
@@ -6617,32 +6097,29 @@ Installers:
             upgrade_codes: Vec::new(),
         };
 
-        let result = Repository::create_install_no_op_result(&request, &manifest, Some(&existing))
-            .expect("no-op result");
+        let result =
+            Repository::create_install_no_op_result(&request, &manifest, Some(&existing)).expect("no-op result");
 
         assert!(result.success);
         assert!(result.no_op);
         assert_eq!(result.version, "1.0.0");
         assert_eq!(
             result.warnings,
-            vec![
-                "Package is already installed; skipping because --no-upgrade was specified."
-                    .to_string()
-            ]
+            vec!["Package is already installed; skipping because --no-upgrade was specified.".to_owned()]
         );
     }
 
     #[test]
     fn create_install_no_op_result_skips_reinstall_when_current() {
         let request = InstallRequest::new(PackageQuery {
-            id: Some("Contoso.App".to_string()),
+            id: Some("Contoso.App".to_owned()),
             ..PackageQuery::default()
         });
 
         let manifest = Manifest {
-            id: "Contoso.App".to_string(),
-            name: "Contoso App".to_string(),
-            version: "2.0.0".to_string(),
+            id: "Contoso.App".to_owned(),
+            name: "Contoso App".to_owned(),
+            version: "2.0.0".to_owned(),
             channel: String::new(),
             publisher: None,
             description: None,
@@ -6665,12 +6142,12 @@ Installers:
             installers: Vec::new(),
         };
         let existing = ListMatch {
-            name: "Contoso App".to_string(),
-            id: "Contoso.App".to_string(),
-            local_id: "Contoso.App".to_string(),
-            installed_version: "2.0.0".to_string(),
-            available_version: Some("2.0.0".to_string()),
-            source_name: Some("winget".to_string()),
+            name: "Contoso App".to_owned(),
+            id: "Contoso.App".to_owned(),
+            local_id: "Contoso.App".to_owned(),
+            installed_version: "2.0.0".to_owned(),
+            available_version: Some("2.0.0".to_owned()),
+            source_name: Some("winget".to_owned()),
             publisher: None,
             scope: None,
             installer_category: None,
@@ -6680,18 +6157,15 @@ Installers:
             upgrade_codes: Vec::new(),
         };
 
-        let result = Repository::create_install_no_op_result(&request, &manifest, Some(&existing))
-            .expect("no-op result");
+        let result =
+            Repository::create_install_no_op_result(&request, &manifest, Some(&existing)).expect("no-op result");
 
         assert!(result.success);
         assert!(result.no_op);
         assert_eq!(result.version, "2.0.0");
         assert_eq!(
             result.warnings,
-            vec![
-                "Package is already installed and up to date; rerun with --force to reinstall."
-                    .to_string()
-            ]
+            vec!["Package is already installed and up to date; rerun with --force to reinstall.".to_owned()]
         );
     }
 
@@ -6719,10 +6193,7 @@ Installers:
         assert_eq!(document["PackageIdentifier"].as_str(), Some("Test.Package"));
         assert_eq!(document["PackageName"].as_str(), Some("Test Package"));
         assert_eq!(document["InstallerType"].as_str(), Some("exe"));
-        assert_eq!(
-            document["Installers"][0]["Architecture"].as_str(),
-            Some("x64")
-        );
+        assert_eq!(document["Installers"][0]["Architecture"].as_str(), Some("x64"));
     }
 
     #[test]
@@ -6765,10 +6236,7 @@ Installers:
         let manifest = parse_yaml_manifest(yaml.as_bytes()).expect("manifest");
         let installer = &manifest.installers[0];
 
-        assert_eq!(
-            installer.switches.silent_with_progress.as_deref(),
-            Some("/SILENT")
-        );
+        assert_eq!(installer.switches.silent_with_progress.as_deref(), Some("/SILENT"));
         assert_eq!(installer.switches.silent.as_deref(), Some("/VERYSILENT"));
         assert_eq!(installer.switches.interactive.as_deref(), Some("/HELP"));
     }
@@ -6798,18 +6266,12 @@ Installers:
 
         let manifest = parse_yaml_manifest(yaml.as_bytes()).expect("manifest");
 
-        assert_eq!(
-            manifest.installers[0].platforms,
-            vec!["Windows.Desktop".to_string()]
-        );
+        assert_eq!(manifest.installers[0].platforms, vec!["Windows.Desktop".to_owned()]);
         assert_eq!(
             manifest.installers[0].minimum_os_version.as_deref(),
             Some("10.0.19041.0")
         );
-        assert_eq!(
-            manifest.installers[1].platforms,
-            vec!["Windows.Universal".to_string()]
-        );
+        assert_eq!(manifest.installers[1].platforms, vec!["Windows.Universal".to_owned()]);
         assert_eq!(
             manifest.installers[1].minimum_os_version.as_deref(),
             Some("10.0.22621.0")
@@ -6820,7 +6282,7 @@ Installers:
     fn installer_switch_arguments_prefer_manifest_switches() {
         let installer = Installer {
             architecture: None,
-            installer_type: Some("inno".to_string()),
+            installer_type: Some("inno".to_owned()),
             url: None,
             sha256: None,
             product_code: None,
@@ -6832,18 +6294,18 @@ Installers:
             platforms: Vec::new(),
             minimum_os_version: None,
             switches: InstallerSwitches {
-                silent: Some("/mysilent".to_string()),
-                silent_with_progress: Some("/mysilentwithprogress".to_string()),
-                interactive: Some("/myinteractive".to_string()),
+                silent: Some("/mysilent".to_owned()),
+                silent_with_progress: Some("/mysilentwithprogress".to_owned()),
+                interactive: Some("/myinteractive".to_owned()),
                 ..InstallerSwitches::default()
             },
             commands: Vec::new(),
             package_dependencies: Vec::new(),
         };
         let manifest = Manifest {
-            id: "Test.Package".to_string(),
-            name: "Test Package".to_string(),
-            version: "1.0.0".to_string(),
+            id: "Test.Package".to_owned(),
+            name: "Test Package".to_owned(),
+            version: "1.0.0".to_owned(),
             channel: String::new(),
             publisher: None,
             description: None,
@@ -6880,7 +6342,7 @@ Installers:
                 Path::new("installer.exe"),
                 &installer
             ),
-            vec!["/mysilent".to_string()]
+            vec!["/mysilent".to_owned()]
         );
         assert_eq!(
             installer_command_arguments(
@@ -6890,7 +6352,7 @@ Installers:
                 Path::new("installer.exe"),
                 &installer
             ),
-            vec!["/mysilentwithprogress".to_string()]
+            vec!["/mysilentwithprogress".to_owned()]
         );
         assert_eq!(
             installer_command_arguments(
@@ -6900,7 +6362,7 @@ Installers:
                 Path::new("installer.exe"),
                 &installer
             ),
-            vec!["/myinteractive".to_string()]
+            vec!["/myinteractive".to_owned()]
         );
     }
 
@@ -6908,7 +6370,7 @@ Installers:
     fn installer_switch_arguments_use_inno_defaults_without_manifest_switches() {
         let installer = Installer {
             architecture: None,
-            installer_type: Some("inno".to_string()),
+            installer_type: Some("inno".to_owned()),
             url: None,
             sha256: None,
             product_code: None,
@@ -6924,9 +6386,9 @@ Installers:
             package_dependencies: Vec::new(),
         };
         let manifest = Manifest {
-            id: "Test.Package".to_string(),
-            name: "Test Package".to_string(),
-            version: "1.0.0".to_string(),
+            id: "Test.Package".to_owned(),
+            name: "Test Package".to_owned(),
+            version: "1.0.0".to_owned(),
             channel: String::new(),
             publisher: None,
             description: None,
@@ -6962,10 +6424,10 @@ Installers:
                 &installer
             ),
             vec![
-                "/SP-".to_string(),
-                "/SILENT".to_string(),
-                "/SUPPRESSMSGBOXES".to_string(),
-                "/NORESTART".to_string()
+                "/SP-".to_owned(),
+                "/SILENT".to_owned(),
+                "/SUPPRESSMSGBOXES".to_owned(),
+                "/NORESTART".to_owned()
             ]
         );
         assert_eq!(
@@ -6977,10 +6439,10 @@ Installers:
                 &installer
             ),
             vec![
-                "/SP-".to_string(),
-                "/VERYSILENT".to_string(),
-                "/SUPPRESSMSGBOXES".to_string(),
-                "/NORESTART".to_string()
+                "/SP-".to_owned(),
+                "/VERYSILENT".to_owned(),
+                "/SUPPRESSMSGBOXES".to_owned(),
+                "/NORESTART".to_owned()
             ]
         );
     }
@@ -6989,7 +6451,7 @@ Installers:
     fn installer_command_arguments_append_manifest_and_cli_switches() {
         let installer = Installer {
             architecture: None,
-            installer_type: Some("msi".to_string()),
+            installer_type: Some("msi".to_owned()),
             url: None,
             sha256: None,
             product_code: None,
@@ -7001,18 +6463,18 @@ Installers:
             platforms: Vec::new(),
             minimum_os_version: None,
             switches: InstallerSwitches {
-                custom: Some("ADDLOCAL=Core".to_string()),
-                log: Some("/log \"<LOGPATH>\"".to_string()),
-                install_location: Some("TARGETDIR=\"<INSTALLPATH>\"".to_string()),
+                custom: Some("ADDLOCAL=Core".to_owned()),
+                log: Some("/log \"<LOGPATH>\"".to_owned()),
+                install_location: Some("TARGETDIR=\"<INSTALLPATH>\"".to_owned()),
                 ..InstallerSwitches::default()
             },
             commands: Vec::new(),
             package_dependencies: Vec::new(),
         };
         let manifest = Manifest {
-            id: "ShareX.ShareX".to_string(),
-            name: "ShareX".to_string(),
-            version: "19.0.2".to_string(),
+            id: "ShareX.ShareX".to_owned(),
+            name: "ShareX".to_owned(),
+            version: "19.0.2".to_owned(),
             channel: String::new(),
             publisher: None,
             description: None,
@@ -7037,65 +6499,51 @@ Installers:
         let mut request = InstallRequest::new(PackageQuery::default());
         request.mode = InstallerMode::Silent;
         request.log_path = Some(PathBuf::from(r"C:\temp\winget.log"));
-        request.custom = Some("REBOOT=ReallySuppress".to_string());
-        request.install_location = Some(r"C:\Apps\ShareX".to_string());
+        request.custom = Some("REBOOT=ReallySuppress".to_owned());
+        request.install_location = Some(r"C:\Apps\ShareX".to_owned());
 
         assert_eq!(
-            installer_command_arguments(
-                "msi",
-                &request,
-                &manifest,
-                Path::new(r"C:\temp\ShareX.msi"),
-                &installer
-            ),
+            installer_command_arguments("msi", &request, &manifest, Path::new(r"C:\temp\ShareX.msi"), &installer),
             vec![
-                "/i".to_string(),
-                r"C:\temp\ShareX.msi".to_string(),
-                "/quiet".to_string(),
-                "/norestart".to_string(),
-                "/log".to_string(),
-                r"C:\temp\winget.log".to_string(),
-                "ADDLOCAL=Core".to_string(),
-                "REBOOT=ReallySuppress".to_string(),
-                r"TARGETDIR=C:\Apps\ShareX".to_string(),
+                "/i".to_owned(),
+                r"C:\temp\ShareX.msi".to_owned(),
+                "/quiet".to_owned(),
+                "/norestart".to_owned(),
+                "/log".to_owned(),
+                r"C:\temp\winget.log".to_owned(),
+                "ADDLOCAL=Core".to_owned(),
+                "REBOOT=ReallySuppress".to_owned(),
+                r"TARGETDIR=C:\Apps\ShareX".to_owned(),
             ]
         );
     }
 
     #[test]
     fn decompresses_mszyml_payload() {
-        let payload =
-            "sV: 1.0.0\nvD:\n  - v: 1.2.3\n    rP: manifests/test.yaml\n    s256H: ABCD\n";
+        let payload = "sV: 1.0.0\nvD:\n  - v: 1.2.3\n    rP: manifests/test.yaml\n    s256H: ABCD\n";
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(payload.as_bytes())
-            .expect("write payload");
+        encoder.write_all(payload.as_bytes()).expect("write payload");
         let compressed = encoder.finish().expect("finish payload");
         let mut mszip = b"CK".to_vec();
         mszip.extend_from_slice(&compressed);
 
         let decompressed = decompress_mszyml(&mszip).expect("decompress");
-        let parsed =
-            serde_yaml::from_str::<PackageVersionDataDocument>(&decompressed).expect("parse");
+        let parsed = serde_yaml::from_str::<PackageVersionDataDocument>(&decompressed).expect("parse");
         assert_eq!(parsed.versions[0].version, "1.2.3");
     }
 
     #[test]
     fn decompresses_mszyml_payload_with_prefix() {
-        let payload =
-            "sV: 1.0.0\nvD:\n  - v: 1.2.3\n    rP: manifests/test.yaml\n    s256H: ABCD\n";
+        let payload = "sV: 1.0.0\nvD:\n  - v: 1.2.3\n    rP: manifests/test.yaml\n    s256H: ABCD\n";
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(payload.as_bytes())
-            .expect("write payload");
+        encoder.write_all(payload.as_bytes()).expect("write payload");
         let compressed = encoder.finish().expect("finish payload");
         let mut prefixed = vec![0u8; 28];
         prefixed.extend_from_slice(b"CK");
         prefixed.extend_from_slice(&compressed);
 
         let decompressed = decompress_mszyml(&prefixed).expect("decompress");
-        let parsed =
-            serde_yaml::from_str::<PackageVersionDataDocument>(&decompressed).expect("parse");
+        let parsed = serde_yaml::from_str::<PackageVersionDataDocument>(&decompressed).expect("parse");
         assert_eq!(parsed.versions[0].version, "1.2.3");
     }
 
@@ -7103,10 +6551,7 @@ Installers:
     fn compares_versions_naturally() {
         assert_eq!(compare_version("1.10.0", "1.9.9"), Ordering::Greater);
         assert_eq!(compare_version("2.0", "10.0"), Ordering::Less);
-        assert_eq!(
-            compare_version("1.0.0-preview2", "1.0.0-preview1"),
-            Ordering::Greater
-        );
+        assert_eq!(compare_version("1.0.0-preview2", "1.0.0-preview1"), Ordering::Greater);
     }
 
     #[test]
@@ -7130,12 +6575,11 @@ Installers:
     #[test]
     fn search_query_many_includes_tag_and_command_conditions() {
         let query = PackageQuery {
-            query: Some("terminal".to_string()),
+            query: Some("terminal".to_owned()),
             ..PackageQuery::default()
         };
 
-        let (where_clause, params) =
-            build_preindexed_where_clause(&query, true, SearchSemantics::Many);
+        let (where_clause, params) = build_preindexed_where_clause(&query, true, SearchSemantics::Many);
 
         assert!(where_clause.contains("tags2"));
         assert!(where_clause.contains("commands2"));
@@ -7145,12 +6589,11 @@ Installers:
     #[test]
     fn show_query_single_omits_tag_and_command_conditions() {
         let query = PackageQuery {
-            query: Some("terminal".to_string()),
+            query: Some("terminal".to_owned()),
             ..PackageQuery::default()
         };
 
-        let (where_clause, params) =
-            build_preindexed_where_clause(&query, true, SearchSemantics::Single);
+        let (where_clause, params) = build_preindexed_where_clause(&query, true, SearchSemantics::Single);
 
         assert!(!where_clause.contains("tags2"));
         assert!(!where_clause.contains("commands2"));
@@ -7160,21 +6603,20 @@ Installers:
     #[test]
     fn explicit_tag_filter_uses_exact_match() {
         let query = PackageQuery {
-            tag: Some("terminal".to_string()),
+            tag: Some("terminal".to_owned()),
             ..PackageQuery::default()
         };
 
-        let (where_clause, params) =
-            build_preindexed_where_clause(&query, true, SearchSemantics::Many);
+        let (where_clause, params) = build_preindexed_where_clause(&query, true, SearchSemantics::Many);
 
         assert!(where_clause.contains("tags2"));
-        assert_eq!(params, vec!["terminal".to_string()]);
+        assert_eq!(params, vec!["terminal".to_owned()]);
     }
 
     #[test]
     fn rest_tag_filter_uses_exact_match() {
         let query = PackageQuery {
-            tag: Some("terminal".to_string()),
+            tag: Some("terminal".to_owned()),
             ..PackageQuery::default()
         };
         let info = RestInformation {
@@ -7197,13 +6639,13 @@ Installers:
     fn selects_installer_using_requested_filters() {
         let installers = vec![
             Installer {
-                architecture: Some("x86".to_string()),
-                installer_type: Some("zip".to_string()),
+                architecture: Some("x86".to_owned()),
+                installer_type: Some("zip".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
@@ -7214,28 +6656,28 @@ Installers:
                 package_dependencies: Vec::new(),
             },
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("msix".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("msix".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
                 platforms: Vec::new(),
                 minimum_os_version: None,
                 switches: InstallerSwitches::default(),
-                commands: vec!["demo".to_string()],
+                commands: vec!["demo".to_owned()],
                 package_dependencies: Vec::new(),
             },
         ];
         let query = PackageQuery {
-            installer_type: Some("msix".to_string()),
-            installer_architecture: Some("x64".to_string()),
-            install_scope: Some("user".to_string()),
-            locale: Some("en-US".to_string()),
+            installer_type: Some("msix".to_owned()),
+            installer_architecture: Some("x64".to_owned()),
+            install_scope: Some("user".to_owned()),
+            locale: Some("en-US".to_owned()),
             ..PackageQuery::default()
         };
 
@@ -7248,13 +6690,13 @@ Installers:
     fn selects_first_installer_when_rank_ties() {
         let installers = vec![
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("machine".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("machine".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
@@ -7265,13 +6707,13 @@ Installers:
                 package_dependencies: Vec::new(),
             },
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
@@ -7283,8 +6725,7 @@ Installers:
             },
         ];
 
-        let selected =
-            select_installer(&installers, &PackageQuery::default()).expect("selected installer");
+        let selected = select_installer(&installers, &PackageQuery::default()).expect("selected installer");
         assert_eq!(selected.scope.as_deref(), Some("machine"));
     }
 
@@ -7292,34 +6733,34 @@ Installers:
     fn selects_installer_using_requested_platform() {
         let installers = vec![
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
-                platforms: vec!["Windows.Universal".to_string()],
+                platforms: vec!["Windows.Universal".to_owned()],
                 minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
-                platforms: vec!["Windows.Desktop".to_string()],
+                platforms: vec!["Windows.Desktop".to_owned()],
                 minimum_os_version: None,
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
@@ -7327,56 +6768,56 @@ Installers:
             },
         ];
         let query = PackageQuery {
-            installer_type: Some("exe".to_string()),
-            platform: Some("Windows.Desktop".to_string()),
+            installer_type: Some("exe".to_owned()),
+            platform: Some("Windows.Desktop".to_owned()),
             ..PackageQuery::default()
         };
 
         let selected = select_installer(&installers, &query).expect("selected installer");
-        assert_eq!(selected.platforms, vec!["Windows.Desktop".to_string()]);
+        assert_eq!(selected.platforms, vec!["Windows.Desktop".to_owned()]);
     }
 
     #[test]
     fn selects_installer_using_requested_os_version() {
         let installers = vec![
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
                 platforms: Vec::new(),
-                minimum_os_version: Some("10.0.22621.0".to_string()),
+                minimum_os_version: Some("10.0.22621.0".to_owned()),
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
             Installer {
-                architecture: Some("x64".to_string()),
-                installer_type: Some("exe".to_string()),
+                architecture: Some("x64".to_owned()),
+                installer_type: Some("exe".to_owned()),
                 url: None,
                 sha256: None,
                 product_code: None,
-                locale: Some("en-US".to_string()),
-                scope: Some("user".to_string()),
+                locale: Some("en-US".to_owned()),
+                scope: Some("user".to_owned()),
                 release_date: None,
                 package_family_name: None,
                 upgrade_code: None,
                 platforms: Vec::new(),
-                minimum_os_version: Some("10.0.19041.0".to_string()),
+                minimum_os_version: Some("10.0.19041.0".to_owned()),
                 switches: InstallerSwitches::default(),
                 commands: Vec::new(),
                 package_dependencies: Vec::new(),
             },
         ];
         let query = PackageQuery {
-            installer_type: Some("exe".to_string()),
-            os_version: Some("10.0.19045.0".to_string()),
+            installer_type: Some("exe".to_owned()),
+            os_version: Some("10.0.19045.0".to_owned()),
             ..PackageQuery::default()
         };
 
@@ -7387,19 +6828,19 @@ Installers:
     #[test]
     fn derives_correlation_name_candidates() {
         let candidates = correlation_name_candidates("PowerToys (Preview) x64");
-        assert!(candidates.contains(&"PowerToys (Preview) x64".to_string()));
-        assert!(candidates.contains(&"PowerToys".to_string()));
+        assert!(candidates.contains(&"PowerToys (Preview) x64".to_owned()));
+        assert!(candidates.contains(&"PowerToys".to_owned()));
     }
 
     #[test]
     fn correlates_installed_package_to_available_match() {
         let installed = InstalledPackage {
-            name: "PowerToys (Preview) x64".to_string(),
-            local_id: r"ARP\Machine\X64\PowerToys".to_string(),
-            installed_version: "0.98.1".to_string(),
+            name: "PowerToys (Preview) x64".to_owned(),
+            local_id: r"ARP\Machine\X64\PowerToys".to_owned(),
+            installed_version: "0.98.1".to_owned(),
             publisher: None,
-            scope: Some("Machine".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("Machine".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7407,25 +6848,24 @@ Installers:
             correlated: None,
         };
         let candidates = vec![SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "Microsoft.PowerToys".to_string(),
-            name: "PowerToys".to_string(),
+            id: "Microsoft.PowerToys".to_owned(),
+            name: "PowerToys".to_owned(),
             moniker: None,
-            version: Some("0.98.1".to_string()),
+            version: Some("0.98.1".to_owned()),
             channel: None,
             match_criteria: None,
         }];
 
-        let correlated =
-            correlate_installed_package(&installed, &candidates, true).expect("correlated");
+        let correlated = correlate_installed_package(&installed, &candidates, true).expect("correlated");
         assert_eq!(correlated.id, "Microsoft.PowerToys");
     }
 
     #[test]
     fn list_query_uses_available_lookup_for_tag_filters() {
         let query = ListQuery {
-            tag: Some("terminal".to_string()),
+            tag: Some("terminal".to_owned()),
             ..ListQuery::default()
         };
 
@@ -7435,12 +6875,12 @@ Installers:
     #[test]
     fn list_tag_filter_requires_correlated_match() {
         let package = InstalledPackage {
-            name: "PowerToys (Preview) x64".to_string(),
-            local_id: r"ARP\Machine\X64\PowerToys".to_string(),
-            installed_version: "0.98.1".to_string(),
+            name: "PowerToys (Preview) x64".to_owned(),
+            local_id: r"ARP\Machine\X64\PowerToys".to_owned(),
+            installed_version: "0.98.1".to_owned(),
             publisher: None,
-            scope: Some("Machine".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("Machine".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7448,7 +6888,7 @@ Installers:
             correlated: None,
         };
         let query = ListQuery {
-            tag: Some("powertoys".to_string()),
+            tag: Some("powertoys".to_owned()),
             ..ListQuery::default()
         };
 
@@ -7458,7 +6898,7 @@ Installers:
     #[test]
     fn list_lookup_ignores_display_count() {
         let query = ListQuery {
-            query: Some("git".to_string()),
+            query: Some("git".to_owned()),
             count: Some(5),
             ..ListQuery::default()
         };
@@ -7470,12 +6910,12 @@ Installers:
     #[test]
     fn strict_list_correlation_avoids_short_substring_matches() {
         let installed = InstalledPackage {
-            name: "GitHub".to_string(),
-            local_id: r"ARP\User\X64\GitHub".to_string(),
-            installed_version: "1.0.0".to_string(),
+            name: "GitHub".to_owned(),
+            local_id: r"ARP\User\X64\GitHub".to_owned(),
+            installed_version: "1.0.0".to_owned(),
             publisher: None,
-            scope: Some("User".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("User".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7483,12 +6923,12 @@ Installers:
             correlated: None,
         };
         let candidates = vec![SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "Git.Git.PreRelease".to_string(),
-            name: "Git".to_string(),
+            id: "Git.Git.PreRelease".to_owned(),
+            name: "Git".to_owned(),
             moniker: None,
-            version: Some("2.54.0".to_string()),
+            version: Some("2.54.0".to_owned()),
             channel: None,
             match_criteria: None,
         }];
@@ -7499,23 +6939,23 @@ Installers:
     #[test]
     fn detects_available_upgrade_from_correlated_package() {
         let package = InstalledPackage {
-            name: "AzCopy v10".to_string(),
-            local_id: r"ARP\Machine\X64\AzCopy".to_string(),
-            installed_version: "10.32.2".to_string(),
+            name: "AzCopy v10".to_owned(),
+            local_id: r"ARP\Machine\X64\AzCopy".to_owned(),
+            installed_version: "10.32.2".to_owned(),
             publisher: None,
-            scope: Some("Machine".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("Machine".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
             upgrade_codes: Vec::new(),
             correlated: Some(SearchMatch {
-                source_name: "winget".to_string(),
+                source_name: "winget".to_owned(),
                 source_kind: SourceKind::PreIndexed,
-                id: "Microsoft.Azure.AZCopy.10".to_string(),
-                name: "AzCopy v10".to_string(),
+                id: "Microsoft.Azure.AZCopy.10".to_owned(),
+                name: "AzCopy v10".to_owned(),
                 moniker: None,
-                version: Some("10.32.3".to_string()),
+                version: Some("10.32.3".to_owned()),
                 channel: None,
                 match_criteria: None,
             }),
@@ -7527,23 +6967,23 @@ Installers:
     #[test]
     fn include_unknown_treats_unknown_version_as_upgradable_when_correlated() {
         let package = InstalledPackage {
-            name: "Example Tool".to_string(),
-            local_id: r"ARP\User\X64\ExampleTool".to_string(),
-            installed_version: "Unknown".to_string(),
+            name: "Example Tool".to_owned(),
+            local_id: r"ARP\User\X64\ExampleTool".to_owned(),
+            installed_version: "Unknown".to_owned(),
             publisher: None,
-            scope: Some("User".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("User".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
             upgrade_codes: Vec::new(),
             correlated: Some(SearchMatch {
-                source_name: "winget".to_string(),
+                source_name: "winget".to_owned(),
                 source_kind: SourceKind::PreIndexed,
-                id: "Contoso.ExampleTool".to_string(),
-                name: "Example Tool".to_string(),
+                id: "Contoso.ExampleTool".to_owned(),
+                name: "Example Tool".to_owned(),
                 moniker: None,
-                version: Some("2.0.0".to_string()),
+                version: Some("2.0.0".to_owned()),
                 channel: None,
                 match_criteria: None,
             }),
@@ -7556,9 +6996,7 @@ Installers:
 
         assert!(installed_package_matches_upgrade_filter(&package, &query));
         assert_eq!(
-            list_match_from_installed(package)
-                .available_version
-                .as_deref(),
+            list_match_from_installed(package).available_version.as_deref(),
             Some("2.0.0")
         );
     }
@@ -7567,18 +7005,18 @@ Installers:
     fn create_repair_list_query_includes_installed_selectors() {
         let request = RepairRequest {
             query: PackageQuery {
-                query: Some("powertoys".to_string()),
-                id: Some("Microsoft.PowerToys".to_string()),
-                name: Some("PowerToys".to_string()),
-                moniker: Some("powertoys".to_string()),
-                source: Some("winget".to_string()),
+                query: Some("powertoys".to_owned()),
+                id: Some("Microsoft.PowerToys".to_owned()),
+                name: Some("PowerToys".to_owned()),
+                moniker: Some("powertoys".to_owned()),
+                source: Some("winget".to_owned()),
                 exact: true,
-                version: Some("0.98.1".to_string()),
-                install_scope: Some("Machine".to_string()),
+                version: Some("0.98.1".to_owned()),
+                install_scope: Some("Machine".to_owned()),
                 ..PackageQuery::default()
             },
             manifest_path: None,
-            product_code: Some("{GUID}".to_string()),
+            product_code: Some("{GUID}".to_owned()),
             mode: InstallerMode::Silent,
             log_path: Some(PathBuf::from("repair.log")),
             accept_package_agreements: true,
@@ -7603,11 +7041,11 @@ Installers:
     fn create_repair_install_request_forces_reinstall_of_resolved_installed_package() {
         let request = RepairRequest {
             query: PackageQuery {
-                name: Some("PowerToys".to_string()),
-                source: Some("winget".to_string()),
-                locale: Some("en-US".to_string()),
-                installer_architecture: Some("x64".to_string()),
-                install_scope: Some("Machine".to_string()),
+                name: Some("PowerToys".to_owned()),
+                source: Some("winget".to_owned()),
+                locale: Some("en-US".to_owned()),
+                installer_architecture: Some("x64".to_owned()),
+                install_scope: Some("Machine".to_owned()),
                 ..PackageQuery::default()
             },
             manifest_path: None,
@@ -7619,15 +7057,15 @@ Installers:
             ignore_security_hash: true,
         };
         let installed = ListMatch {
-            name: "PowerToys".to_string(),
-            id: "Microsoft.PowerToys".to_string(),
-            local_id: r"ARP\Machine\X64\Microsoft.PowerToys".to_string(),
-            installed_version: "0.98.1".to_string(),
-            available_version: Some("0.98.2".to_string()),
-            source_name: Some("winget".to_string()),
+            name: "PowerToys".to_owned(),
+            id: "Microsoft.PowerToys".to_owned(),
+            local_id: r"ARP\Machine\X64\Microsoft.PowerToys".to_owned(),
+            installed_version: "0.98.1".to_owned(),
+            available_version: Some("0.98.2".to_owned()),
+            source_name: Some("winget".to_owned()),
             publisher: None,
-            scope: Some("Machine".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("Machine".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7635,24 +7073,15 @@ Installers:
         };
 
         let install_request = Repository::create_repair_install_request(&request, Some(&installed));
-        assert_eq!(
-            install_request.query.id.as_deref(),
-            Some("Microsoft.PowerToys")
-        );
+        assert_eq!(install_request.query.id.as_deref(), Some("Microsoft.PowerToys"));
         assert!(install_request.query.query.is_none());
         assert!(install_request.query.name.is_none());
         assert!(install_request.query.moniker.is_none());
         assert_eq!(install_request.query.source.as_deref(), Some("winget"));
         assert_eq!(install_request.query.version.as_deref(), Some("0.98.1"));
         assert_eq!(install_request.query.locale.as_deref(), Some("en-US"));
-        assert_eq!(
-            install_request.query.installer_architecture.as_deref(),
-            Some("x64")
-        );
-        assert_eq!(
-            install_request.query.install_scope.as_deref(),
-            Some("Machine")
-        );
+        assert_eq!(install_request.query.installer_architecture.as_deref(), Some("x64"));
+        assert_eq!(install_request.query.install_scope.as_deref(), Some("Machine"));
         assert!(install_request.query.exact);
         assert_eq!(install_request.mode, InstallerMode::SilentWithProgress);
         assert_eq!(install_request.log_path, Some(PathBuf::from("repair.log")));
@@ -7665,8 +7094,7 @@ Installers:
     fn source_scoped_pin_operations_round_trip() {
         let app_root = temp_app_root("pins");
         let result = (|| -> Result<()> {
-            let repository =
-                Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
+            let repository = Repository::open_with_options(RepositoryOptions::new(app_root.clone()))?;
             repository.add_pin("Contoso.Tool", "1.0", "winget", PinType::Pinning)?;
             repository.add_pin("Contoso.Tool", "*", "test", PinType::Blocking)?;
             repository.add_pin("Fabrikam.Tool", "*", "", PinType::Pinning)?;
@@ -7705,12 +7133,12 @@ Installers:
     #[test]
     fn source_specific_pins_override_source_agnostic_pins() {
         let item = ListMatch {
-            name: "Contoso Tool".to_string(),
-            id: "Contoso.Tool".to_string(),
-            local_id: r"ARP\User\X64\Contoso.Tool".to_string(),
-            installed_version: "1.0.0".to_string(),
-            available_version: Some("2.0.0".to_string()),
-            source_name: Some("winget".to_string()),
+            name: "Contoso Tool".to_owned(),
+            id: "Contoso.Tool".to_owned(),
+            local_id: r"ARP\User\X64\Contoso.Tool".to_owned(),
+            installed_version: "1.0.0".to_owned(),
+            available_version: Some("2.0.0".to_owned()),
+            source_name: Some("winget".to_owned()),
             publisher: None,
             scope: None,
             installer_category: None,
@@ -7721,15 +7149,15 @@ Installers:
         };
         let pins = vec![
             PinRecord {
-                package_id: "Contoso.Tool".to_string(),
-                version: "*".to_string(),
+                package_id: "Contoso.Tool".to_owned(),
+                version: "*".to_owned(),
                 source_id: String::new(),
                 pin_type: PinType::Blocking,
             },
             PinRecord {
-                package_id: "Contoso.Tool".to_string(),
-                version: "2.0.*".to_string(),
-                source_id: "winget".to_string(),
+                package_id: "Contoso.Tool".to_owned(),
+                version: "2.0.*".to_owned(),
+                source_id: "winget".to_owned(),
                 pin_type: PinType::Pinning,
             },
         ];
@@ -7740,12 +7168,12 @@ Installers:
     #[test]
     fn blocking_pin_blocks_upgrade() {
         let item = ListMatch {
-            name: "Contoso Tool".to_string(),
-            id: "Contoso.Tool".to_string(),
-            local_id: r"ARP\User\X64\Contoso.Tool".to_string(),
-            installed_version: "1.0.0".to_string(),
-            available_version: Some("2.0.0".to_string()),
-            source_name: Some("winget".to_string()),
+            name: "Contoso Tool".to_owned(),
+            id: "Contoso.Tool".to_owned(),
+            local_id: r"ARP\User\X64\Contoso.Tool".to_owned(),
+            installed_version: "1.0.0".to_owned(),
+            available_version: Some("2.0.0".to_owned()),
+            source_name: Some("winget".to_owned()),
             publisher: None,
             scope: None,
             installer_category: None,
@@ -7755,9 +7183,9 @@ Installers:
             upgrade_codes: Vec::new(),
         };
         let pins = vec![PinRecord {
-            package_id: "Contoso.Tool".to_string(),
-            version: "*".to_string(),
-            source_id: "winget".to_string(),
+            package_id: "Contoso.Tool".to_owned(),
+            version: "*".to_owned(),
+            source_id: "winget".to_owned(),
             pin_type: PinType::Blocking,
         }];
 
@@ -7767,16 +7195,11 @@ Installers:
     #[cfg(windows)]
     #[test]
     fn parses_msix_package_full_name_into_version_and_family() {
-        let parsed = parse_msix_package_full_name(
-            "Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe",
-        )
-        .expect("package metadata");
+        let parsed = parse_msix_package_full_name("Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe")
+            .expect("package metadata");
 
         assert_eq!(parsed.version, "0.98.1.0");
-        assert_eq!(
-            parsed.family_name,
-            "Microsoft.PowerToys.SparseApp_8wekyb3d8bbwe"
-        );
+        assert_eq!(parsed.family_name, "Microsoft.PowerToys.SparseApp_8wekyb3d8bbwe");
     }
 
     #[cfg(windows)]
@@ -7791,42 +7214,39 @@ Installers:
     #[test]
     fn search_ranking_prefers_exact_name_over_tag_match() {
         let query = PackageQuery {
-            query: Some("PowerToys".to_string()),
+            query: Some("PowerToys".to_owned()),
             ..Default::default()
         };
         let exact_name = SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "Microsoft.PowerToys".to_string(),
-            name: "PowerToys".to_string(),
-            moniker: Some("powertoys".to_string()),
-            version: Some("0.98.1".to_string()),
+            id: "Microsoft.PowerToys".to_owned(),
+            name: "PowerToys".to_owned(),
+            moniker: Some("powertoys".to_owned()),
+            version: Some("0.98.1".to_owned()),
             channel: None,
-            match_criteria: Some("Moniker: powertoys".to_string()),
+            match_criteria: Some("Moniker: powertoys".to_owned()),
         };
         let tag_match = SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "JiriPolasek.QRCodesforCommandPalette".to_string(),
-            name: "QR Codes for Command Palette".to_string(),
+            id: "JiriPolasek.QRCodesforCommandPalette".to_owned(),
+            name: "QR Codes for Command Palette".to_owned(),
             moniker: None,
-            version: Some("0.4.0.0".to_string()),
+            version: Some("0.4.0.0".to_owned()),
             channel: None,
-            match_criteria: Some("Tag: microsoft-powertoys".to_string()),
+            match_criteria: Some("Tag: microsoft-powertoys".to_owned()),
         };
 
-        assert!(
-            search_match_sort_score(&exact_name, &query)
-                > search_match_sort_score(&tag_match, &query)
-        );
+        assert!(search_match_sort_score(&exact_name, &query) > search_match_sort_score(&tag_match, &query));
     }
 
     #[test]
     fn select_best_text_match_prefers_exact_tag_value() {
         let values = vec![
-            "microsoft-powertoys".to_string(),
-            "powertoys-run".to_string(),
-            "powertoys".to_string(),
+            "microsoft-powertoys".to_owned(),
+            "powertoys-run".to_owned(),
+            "powertoys".to_owned(),
         ];
 
         assert_eq!(
@@ -7838,7 +7258,7 @@ Installers:
     #[test]
     fn search_match_criteria_is_blank_for_name_match() {
         let query = PackageQuery {
-            query: Some("PowerToys".to_string()),
+            query: Some("PowerToys".to_owned()),
             ..Default::default()
         };
 
@@ -7848,7 +7268,7 @@ Installers:
             Some("powertoys"),
             &query,
             SearchSemantics::Many,
-            |_| Ok(Some("powertoys".to_string())),
+            |_| Ok(Some("powertoys".to_owned())),
             |_| Ok(None),
         )
         .expect("match criteria");
@@ -7859,34 +7279,31 @@ Installers:
     #[test]
     fn search_ranking_prefers_direct_name_match_even_with_unknown_version() {
         let query = PackageQuery {
-            query: Some("PowerToys".to_string()),
+            query: Some("PowerToys".to_owned()),
             ..Default::default()
         };
         let unknown_version = SearchMatch {
-            source_name: "msstore".to_string(),
+            source_name: "msstore".to_owned(),
             source_kind: SourceKind::Rest,
-            id: "XP89DCGQ3K6VLD".to_string(),
-            name: "Microsoft PowerToys".to_string(),
+            id: "XP89DCGQ3K6VLD".to_owned(),
+            name: "Microsoft PowerToys".to_owned(),
             moniker: None,
-            version: Some("Unknown".to_string()),
+            version: Some("Unknown".to_owned()),
             channel: None,
             match_criteria: None,
         };
         let tag_match = SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "Riri.QRCodeforCmdPal".to_string(),
-            name: "QR Code for CmdPal".to_string(),
+            id: "Riri.QRCodeforCmdPal".to_owned(),
+            name: "QR Code for CmdPal".to_owned(),
             moniker: None,
-            version: Some("0.0.1.0".to_string()),
+            version: Some("0.0.1.0".to_owned()),
             channel: None,
-            match_criteria: Some("Tag: powertoys".to_string()),
+            match_criteria: Some("Tag: powertoys".to_owned()),
         };
 
-        assert!(
-            search_match_sort_score(&unknown_version, &query)
-                > search_match_sort_score(&tag_match, &query)
-        );
+        assert!(search_match_sort_score(&unknown_version, &query) > search_match_sort_score(&tag_match, &query));
     }
 
     #[test]
@@ -7903,45 +7320,42 @@ Installers:
     #[test]
     fn search_ranking_prefers_direct_name_prefix_over_tag_only_match() {
         let query = PackageQuery {
-            query: Some("PowerToys".to_string()),
+            query: Some("PowerToys".to_owned()),
             ..Default::default()
         };
         let prefix_name = SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "advaith.CurrencyConverterPowerToys".to_string(),
-            name: "PowerToys-Run-Currency-Converter".to_string(),
+            id: "advaith.CurrencyConverterPowerToys".to_owned(),
+            name: "PowerToys-Run-Currency-Converter".to_owned(),
             moniker: None,
-            version: Some("1.5.4".to_string()),
+            version: Some("1.5.4".to_owned()),
             channel: None,
             match_criteria: None,
         };
         let exact_tag = SearchMatch {
-            source_name: "winget".to_string(),
+            source_name: "winget".to_owned(),
             source_kind: SourceKind::PreIndexed,
-            id: "Riri.QRCodeforCmdPal".to_string(),
-            name: "QR Code for CmdPal".to_string(),
+            id: "Riri.QRCodeforCmdPal".to_owned(),
+            name: "QR Code for CmdPal".to_owned(),
             moniker: None,
-            version: Some("0.0.1.0".to_string()),
+            version: Some("0.0.1.0".to_owned()),
             channel: None,
-            match_criteria: Some("Tag: powertoys".to_string()),
+            match_criteria: Some("Tag: powertoys".to_owned()),
         };
 
-        assert!(
-            search_match_sort_score(&prefix_name, &query)
-                > search_match_sort_score(&exact_tag, &query)
-        );
+        assert!(search_match_sort_score(&prefix_name, &query) > search_match_sort_score(&exact_tag, &query));
     }
 
     #[test]
     fn list_sort_prefers_main_package_then_sparse_app() {
         let main = InstalledPackage {
-            name: "PowerToys (Preview) x64".to_string(),
-            local_id: r"ARP\User\X64\PowerToys".to_string(),
-            installed_version: "0.98.1".to_string(),
+            name: "PowerToys (Preview) x64".to_owned(),
+            local_id: r"ARP\User\X64\PowerToys".to_owned(),
+            installed_version: "0.98.1".to_owned(),
             publisher: None,
-            scope: Some("User".to_string()),
-            installer_category: Some("exe".to_string()),
+            scope: Some("User".to_owned()),
+            installer_category: Some("exe".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7949,13 +7363,12 @@ Installers:
             correlated: None,
         };
         let sparse = InstalledPackage {
-            name: "PowerToys.SparseApp".to_string(),
-            local_id: r"MSIX\Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe"
-                .to_string(),
-            installed_version: "0.98.1.0".to_string(),
+            name: "PowerToys.SparseApp".to_owned(),
+            local_id: r"MSIX\Microsoft.PowerToys.SparseApp_0.98.1.0_neutral__8wekyb3d8bbwe".to_owned(),
+            installed_version: "0.98.1.0".to_owned(),
             publisher: None,
-            scope: Some("User".to_string()),
-            installer_category: Some("msix".to_string()),
+            scope: Some("User".to_owned()),
+            installer_category: Some("msix".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7963,14 +7376,12 @@ Installers:
             correlated: None,
         };
         let extension = InstalledPackage {
-            name: "PowerToys FileLocksmith Context Menu".to_string(),
-            local_id:
-                r"MSIX\Microsoft.PowerToys.FileLocksmithContextMenu_0.98.1.0_neutral__8wekyb3d8bbwe"
-                    .to_string(),
-            installed_version: "0.98.1.0".to_string(),
+            name: "PowerToys FileLocksmith Context Menu".to_owned(),
+            local_id: r"MSIX\Microsoft.PowerToys.FileLocksmithContextMenu_0.98.1.0_neutral__8wekyb3d8bbwe".to_owned(),
+            installed_version: "0.98.1.0".to_owned(),
             publisher: None,
-            scope: Some("User".to_string()),
-            installer_category: Some("msix".to_string()),
+            scope: Some("User".to_owned()),
+            installer_category: Some("msix".to_owned()),
             install_location: None,
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
@@ -7993,16 +7404,16 @@ Installers:
     #[cfg(windows)]
     fn registry_entry_matching_prefers_local_identity_over_correlated_id() {
         let installed = ListMatch {
-            name: "ShareX".to_string(),
-            id: "ShareX.ShareX".to_string(),
-            local_id: r"ARP\Machine\X64\ShareX".to_string(),
-            installed_version: "19.0.2".to_string(),
+            name: "ShareX".to_owned(),
+            id: "ShareX.ShareX".to_owned(),
+            local_id: r"ARP\Machine\X64\ShareX".to_owned(),
+            installed_version: "19.0.2".to_owned(),
             available_version: None,
-            source_name: Some("winget".to_string()),
-            publisher: Some("ShareX Team".to_string()),
-            scope: Some("Machine".to_string()),
-            installer_category: Some("exe".to_string()),
-            install_location: Some(r"C:\Program Files\ShareX".to_string()),
+            source_name: Some("winget".to_owned()),
+            publisher: Some("ShareX Team".to_owned()),
+            scope: Some("Machine".to_owned()),
+            installer_category: Some("exe".to_owned()),
+            install_location: Some(r"C:\Program Files\ShareX".to_owned()),
             package_family_names: Vec::new(),
             product_codes: Vec::new(),
             upgrade_codes: Vec::new(),
@@ -8028,11 +7439,7 @@ Installers:
         );
         assert_eq!(
             r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#,
-            build_uninstall_command(
-                r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#,
-                true,
-                false
-            )
+            build_uninstall_command(r#""C:\Program Files\ShareX\unins000.exe" /VERYSILENT"#, true, false)
         );
         assert_eq!(
             r#""C:\Program Files\ShareX\unins000.exe""#,
