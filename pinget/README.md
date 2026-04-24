@@ -9,7 +9,7 @@ The current goal is to keep the subtree self-contained enough that it can be spl
 | Path | Language | Output | Notes |
 | --- | --- | --- | --- |
 | `rust` | Rust | `pinget` CLI + `pinget-core` library | Cargo workspace with a reusable core crate and a CLI crate |
-| `dotnet` | C# / .NET 10 | `pinget` CLI + `Pinget.Core` library + Pinget PowerShell module | Solution with a reusable core library, CLI app, tests, and a PowerShell engine/cmdlet layer |
+| `dotnet` | C# / .NET 10 | `pinget` CLI + `Devolutions.Pinget.Core` library + Pinget PowerShell module | Solution with a reusable core library, CLI app, tests, and a PowerShell engine/cmdlet layer |
 
 ## Current scope
 
@@ -27,7 +27,7 @@ Structured manifest output is also supported:
 - `show --output json|yaml`
 - `search --manifests --output json|yaml`
 
-The C# implementation also ships a **Pinget PowerShell module** that mirrors the upstream `Microsoft.WinGet.Client` cmdlet family with renamed `Pinget` nouns, backed entirely by `Pinget.Core` rather than COM / WinRT APIs.
+The C# implementation also ships a **Pinget PowerShell module** that mirrors the upstream `Microsoft.WinGet.Client` cmdlet family with renamed `Pinget` nouns, backed entirely by `Devolutions.Pinget.Core` rather than COM / WinRT APIs.
 
 ## Non-goals
 
@@ -90,33 +90,33 @@ cargo run -p pinget-cli --manifest-path rust\Cargo.toml -- search WinMerge
 ### C#
 
 ```powershell
-dotnet format dotnet\WinGetDotNet.slnx
-dotnet build dotnet\WinGetDotNet.slnx -c Release
-dotnet test dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj -c Release
+dotnet format dotnet\Devolutions.Pinget.slnx
+dotnet build dotnet\Devolutions.Pinget.slnx -c Release
+dotnet test dotnet\src\Devolutions.Pinget.Core.Tests\Devolutions.Pinget.Core.Tests.csproj -c Release
 pwsh -NoLogo -NoProfile -File (Resolve-Path 'dotnet\tests\RunTests.ps1')
 ```
 
 Run:
 
 ```powershell
-dotnet run --project dotnet\src\WinGetCli\WinGetCli.csproj -- search WinMerge
+dotnet run --project dotnet\src\Devolutions.Pinget.Cli\Devolutions.Pinget.Cli.csproj -- search WinMerge
 ```
 
 ## Repository structure
 
 ### Rust
 
-- `rust\crates\winget-core` - `pinget-core` library source
-- `rust\crates\winget-cli` - `pinget` CLI wrapper
+- `rust\crates\pinget-core` - `pinget-core` library source
+- `rust\crates\pinget-cli` - `pinget` CLI wrapper
 - `rust\tools` - parity and comparison helpers
 
 ### C#
 
-- `dotnet\src\WinGetCore` - `Pinget.Core` library
-- `dotnet\src\WinGetCli` - `Pinget.Cli` wrapper
-- `dotnet\src\WinGetCore.Tests` - unit tests
-- `dotnet\src\Pinget.PowerShell.Engine` - PowerShell engine over the C# core
-- `dotnet\src\Pinget.PowerShell.Cmdlets` - PowerShell cmdlet implementation
+- `dotnet\src\Devolutions.Pinget.Core` - `Devolutions.Pinget.Core` library
+- `dotnet\src\Devolutions.Pinget.Cli` - `Devolutions.Pinget.Cli` wrapper
+- `dotnet\src\Devolutions.Pinget.Core.Tests` - unit tests
+- `dotnet\src\Devolutions.Pinget.PowerShell.Engine` - PowerShell engine over the C# core
+- `dotnet\src\Devolutions.Pinget.PowerShell.Cmdlets` - PowerShell cmdlet implementation
 - `dotnet\tests` - Pinget PowerShell Pester coverage
 
 ## Extraction prep

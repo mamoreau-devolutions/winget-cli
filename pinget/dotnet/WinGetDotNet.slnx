@@ -1,8 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/WinGetCli/WinGetCli.csproj" />
-    <Project Path="src/WinGetCore/WinGetCore.csproj" />
-    <Project Path="src/Pinget.PowerShell.Engine/Pinget.PowerShell.Engine.csproj" />
-    <Project Path="src/Pinget.PowerShell.Cmdlets/Pinget.PowerShell.Cmdlets.csproj" />
-  </Folder>
-</Solution>

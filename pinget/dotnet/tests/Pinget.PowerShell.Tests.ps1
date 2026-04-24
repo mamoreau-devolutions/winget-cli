@@ -114,9 +114,9 @@ Describe 'Pinget command metadata' {
     }
 
     It 'declares upstream-like output types for key commands' {
-        (Get-Command Get-PingetSource -Module Pinget).OutputType.Type.FullName | Should -Contain 'Pinget.PowerShell.Engine.PSObjects.PSSourceResult'
-        (Get-Command Find-PingetPackage -Module Pinget).OutputType.Type.FullName | Should -Contain 'Pinget.PowerShell.Engine.PSObjects.PSFoundCatalogPackage'
-        (Get-Command Export-PingetPackage -Module Pinget).OutputType.Type.FullName | Should -Contain 'Pinget.PowerShell.Engine.PSObjects.PSDownloadResult'
+        (Get-Command Get-PingetSource -Module Pinget).OutputType.Type.FullName | Should -Contain 'Devolutions.Pinget.PowerShell.Engine.PSObjects.PSSourceResult'
+        (Get-Command Find-PingetPackage -Module Pinget).OutputType.Type.FullName | Should -Contain 'Devolutions.Pinget.PowerShell.Engine.PSObjects.PSFoundCatalogPackage'
+        (Get-Command Export-PingetPackage -Module Pinget).OutputType.Type.FullName | Should -Contain 'Devolutions.Pinget.PowerShell.Engine.PSObjects.PSDownloadResult'
     }
 }
 
@@ -172,7 +172,7 @@ Describe 'Pinget format data and result objects' {
     }
 
     It 'registers format data for package version info' {
-        $typeData = Get-FormatData -TypeName 'Pinget.PowerShell.Engine.PSObjects.PSPackageVersionInfo'
+        $typeData = Get-FormatData -TypeName 'Devolutions.Pinget.PowerShell.Engine.PSObjects.PSPackageVersionInfo'
         $typeData | Should -Not -BeNullOrEmpty
     }
 

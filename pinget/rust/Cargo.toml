@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/winget-core",
-    "crates/winget-cli",
+    "crates/pinget-core",
+    "crates/pinget-cli",
 ]
 resolver = "3"
 

@@ -64,9 +64,9 @@ cargo build -p pinget-cli --manifest-path rust\Cargo.toml
 ### C#
 
 ```powershell
-dotnet format dotnet\WinGetDotNet.slnx
-dotnet build dotnet\WinGetDotNet.slnx -c Release
-dotnet test dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj -c Release
+dotnet format dotnet\Devolutions.Pinget.slnx
+dotnet build dotnet\Devolutions.Pinget.slnx -c Release
+dotnet test dotnet\src\Devolutions.Pinget.Core.Tests\Devolutions.Pinget.Core.Tests.csproj -c Release
 pwsh -NoLogo -NoProfile -File (Resolve-Path 'dotnet\tests\RunTests.ps1')
 ```
 
