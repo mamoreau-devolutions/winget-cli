@@ -2478,6 +2478,7 @@ fn read_reg_dword(key: &RegKey, value_name: &str) -> Option<u32> {
     key.get_value::<u32, _>(value_name).ok()
 }
 
+#[cfg(windows)]
 fn looks_like_product_code(value: &str) -> bool {
     value.starts_with('{') && value.ends_with('}')
 }
@@ -4780,6 +4781,7 @@ fn dispatch_installer(
     bail!("Installing packages is only supported on Windows")
 }
 
+#[cfg(any(windows, test))]
 fn installer_command_arguments(
     installer_type: &str,
     request: &InstallRequest,
@@ -4844,6 +4846,7 @@ fn installer_command_arguments(
     args
 }
 
+#[cfg(any(windows, test))]
 fn default_installer_arguments(installer_type: &str, mode: InstallerMode) -> Vec<String> {
     match mode {
         InstallerMode::Interactive => Vec::new(),
@@ -4872,6 +4875,7 @@ fn default_installer_arguments(installer_type: &str, mode: InstallerMode) -> Vec
     }
 }
 
+#[cfg(any(windows, test))]
 fn default_log_switch(installer_type: &str) -> Option<&'static str> {
     match installer_type {
         "burn" | "wix" | "msi" => Some("/log \"<LOGPATH>\""),
@@ -4880,6 +4884,7 @@ fn default_log_switch(installer_type: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn default_install_location_switch(installer_type: &str) -> Option<&'static str> {
     match installer_type {
         "burn" | "wix" | "msi" => Some("TARGETDIR=\"<INSTALLPATH>\""),
@@ -4889,6 +4894,7 @@ fn default_install_location_switch(installer_type: &str) -> Option<&'static str>
     }
 }
 
+#[cfg(any(windows, test))]
 fn resolve_template_switch(
     manifest_value: Option<&str>,
     fallback: Option<&str>,
@@ -4902,12 +4908,14 @@ fn resolve_template_switch(
     Some(template.replace(token, &replacement))
 }
 
+#[cfg(any(windows, test))]
 fn append_switches(args: &mut Vec<String>, value: Option<String>) {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         args.extend(split_installer_switches(&value));
     }
 }
 
+#[cfg(any(windows, test))]
 fn split_installer_switches(value: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -6180,6 +6188,7 @@ Installers:
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn parses_msix_package_full_name_into_version_and_family() {
         let parsed = parse_msix_package_full_name(
@@ -6194,6 +6203,7 @@ Installers:
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn recognizes_windows_system_paths() {
         assert!(is_windows_system_path(r"C:\Windows\SystemApps\Contoso"));
