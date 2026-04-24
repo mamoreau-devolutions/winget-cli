@@ -74,6 +74,33 @@ public class Repository : IDisposable
         SourceStoreManager.Save(_store, _appRoot);
     }
 
+    public void ResetSource(string name)
+    {
+        var index = _store.Sources.FindIndex(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+            throw new InvalidOperationException($"Source '{name}' not found.");
+
+        var source = _store.Sources[index];
+        var stateDir = SourceStoreManager.SourceStateDir(source, _appRoot);
+        if (Directory.Exists(stateDir))
+            Directory.Delete(stateDir, recursive: true);
+
+        var defaultSource = SourceStore.Default().Sources
+            .FirstOrDefault(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase));
+
+        if (defaultSource is not null)
+        {
+            _store.Sources[index] = defaultSource with { };
+        }
+        else
+        {
+            source.LastUpdate = null;
+            source.SourceVersion = null;
+        }
+
+        SourceStoreManager.Save(_store, _appRoot);
+    }
+
     public void ResetSources()
     {
         foreach (var source in _store.Sources)
