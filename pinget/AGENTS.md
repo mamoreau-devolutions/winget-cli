@@ -6,6 +6,7 @@ This directory is being prepared to become its own `pinget` repository. Treat `p
 
 - Maintain the Rust CLI + core in `rust\`
 - Maintain the C# CLI + core + PowerShell module in `dotnet\`
+- Keep **both** `rust\` and `dotnet\` directories in the standalone-repo prep
 - Keep behavior aligned with WinGet where practical
 - Keep the implementation **COM-free**
 
@@ -28,6 +29,23 @@ If an upstream behavior depends on one of those, document the limit instead of f
    - C# namespaces/assemblies: `Pinget.*`
    - Rust crates/binaries: `pinget-*` / `pinget`
 4. Keep Rust and C# behavior aligned when the same feature exists in both implementations.
+5. When upstream `winget-cli` behavior or code needs to be referenced, create a local reference clone at `pinget\winget-cli\` and keep Pinget work in the sibling `rust\` and `dotnet\` trees rather than copying upstream code into them.
+
+## Referencing winget-cli
+
+If you need the upstream repository for comparison, clone it into the Pinget root like this:
+
+```powershell
+Set-Location .\pinget
+git clone https://github.com/microsoft/winget-cli.git .\winget-cli
+```
+
+Guidelines:
+
+- treat `winget-cli\` as a **read-only reference clone**
+- do not move Pinget sources into that clone
+- do not collapse Pinget down to only one implementation; keep both `rust\` and `dotnet\`
+- prefer extracting behavior, docs, and test expectations rather than copying implementation wholesale
 
 ## Validation
 
@@ -58,4 +76,5 @@ When adding new files or build instructions, prefer layouts that will still make
 
 - avoid parent-repo-relative paths
 - keep Pinget docs close to the subtree
+- keep any upstream reference clone under `winget-cli\` at the Pinget root only
 - avoid coupling to unrelated `winget-cli` infrastructure unless there is no practical alternative
