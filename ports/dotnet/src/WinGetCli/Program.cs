@@ -263,10 +263,14 @@ var suSourceArg = new Argument<string?>("source", () => null, "Source name");
 sourceUpdateCmd.AddArgument(suSourceArg);
 var sourceExportCmd = new Command("export", "Export sources");
 var sourceAddCmd = new Command("add", "Add source");
-var saNameArg = new Argument<string>("name", "Source name");
-var saArgArg = new Argument<string>("arg", "Source URL");
-var saTypeOpt = new Option<string>("--type", () => "rest", "Source type");
-sourceAddCmd.AddArgument(saNameArg); sourceAddCmd.AddArgument(saArgArg); sourceAddCmd.AddOption(saTypeOpt);
+var saNameArg = new Argument<string?>("name", () => null, "Source name");
+var saArgArg = new Argument<string?>("arg", () => null, "Source URL");
+var saNameOpt = new Option<string?>("--name", "Source name"); saNameOpt.AddAlias("-n");
+var saArgOpt = new Option<string?>("--arg", "Source URL"); saArgOpt.AddAlias("-a");
+var saTypeOpt = new Option<string?>("--type", "Source type"); saTypeOpt.AddAlias("-t");
+var saTrustLevelOpt = new Option<string?>("--trust-level", "Source trust level");
+sourceAddCmd.AddArgument(saNameArg); sourceAddCmd.AddArgument(saArgArg);
+foreach (var o in new Option[] { saNameOpt, saArgOpt, saTypeOpt, saTrustLevelOpt, }) sourceAddCmd.AddOption(o);
 var sourceRemoveCmd = new Command("remove", "Remove source");
 var srNameArg = new Argument<string>("name", "Source name");
 sourceRemoveCmd.AddArgument(srNameArg);
@@ -300,13 +304,23 @@ sourceExportCmd.SetHandler(() =>
     Console.WriteLine(JsonSerializer.Serialize(new { Sources = sources }, JsonOpts));
 });
 
-sourceAddCmd.SetHandler((name, arg, type) =>
+sourceAddCmd.SetHandler((ctx) =>
 {
+    var name = ResolveSourceAddValue(
+        ctx.ParseResult.GetValueForArgument(saNameArg),
+        ctx.ParseResult.GetValueForOption(saNameOpt),
+        "name");
+    var arg = ResolveSourceAddValue(
+        ctx.ParseResult.GetValueForArgument(saArgArg),
+        ctx.ParseResult.GetValueForOption(saArgOpt),
+        "argument");
+    var type = ctx.ParseResult.GetValueForOption(saTypeOpt);
+    _ = ctx.ParseResult.GetValueForOption(saTrustLevelOpt);
     using var repo = Repository.Open();
-    var kind = type.Equals("preindexed", StringComparison.OrdinalIgnoreCase) ? SourceKind.PreIndexed : SourceKind.Rest;
+    var kind = ParseSourceKind(type);
     repo.AddSource(name, arg, kind);
     Console.WriteLine("Done");
-}, saNameArg, saArgArg, saTypeOpt);
+});
 
 sourceRemoveCmd.SetHandler((name) =>
 {
@@ -1007,6 +1021,42 @@ static (string Symbol, string Description)? LookupHresult(long code)
 static void PrintWarnings(List<string> warnings) { foreach (var w in warnings) Console.Error.WriteLine($"warning: {w}"); }
 static void PrintOpt(string label, string? value) { if (value is not null) Console.WriteLine($"{label}: {value}"); }
 static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + ".";
+
+static string ResolveSourceAddValue(string? positionalValue, string? optionValue, string label)
+{
+    if (!string.IsNullOrWhiteSpace(positionalValue) &&
+        !string.IsNullOrWhiteSpace(optionValue) &&
+        !string.Equals(positionalValue, optionValue, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException($"Conflicting source {label} values were provided.");
+    }
+
+    if (!string.IsNullOrWhiteSpace(optionValue))
+        return optionValue;
+
+    if (!string.IsNullOrWhiteSpace(positionalValue))
+        return positionalValue;
+
+    throw new InvalidOperationException($"source add requires a {label}.");
+}
+
+static SourceKind ParseSourceKind(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value) ||
+        string.Equals(value, "rest", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "Microsoft.Rest", StringComparison.OrdinalIgnoreCase))
+    {
+        return SourceKind.Rest;
+    }
+
+    if (string.Equals(value, "preindexed", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "Microsoft.PreIndexed.Package", StringComparison.OrdinalIgnoreCase))
+    {
+        return SourceKind.PreIndexed;
+    }
+
+    throw new InvalidOperationException($"Unsupported source type: {value}");
+}
 
 static void PrintTable(string[] headers, List<string[]> rows)
 {

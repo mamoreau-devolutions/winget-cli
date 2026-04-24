@@ -195,10 +195,16 @@ enum PinCommands {
 
 #[derive(Args)]
 struct SourceAddArgs {
-    name: String,
-    arg: String,
-    #[arg(long = "type", default_value = "rest")]
+    name: Option<String>,
+    arg: Option<String>,
+    #[arg(short = 'n', long = "name")]
+    name_option: Option<String>,
+    #[arg(short = 'a', long = "arg")]
+    arg_option: Option<String>,
+    #[arg(short = 't', long = "type", default_value = "rest")]
     kind: String,
+    #[arg(long = "trust-level")]
+    trust_level: Option<String>,
 }
 
 #[derive(Args)]
@@ -535,11 +541,18 @@ fn run() -> Result<()> {
                 }
                 SourceCommands::Export => print_source_export(&repository),
                 SourceCommands::Add(args) => {
-                    let kind = match args.kind.as_str() {
-                        "preindexed" | "PreIndexed" => SourceKind::PreIndexed,
-                        _ => SourceKind::Rest,
-                    };
-                    repository.add_source(&args.name, &args.arg, kind)?;
+                    let name = resolve_source_add_value(
+                        args.name.as_deref(),
+                        args.name_option.as_deref(),
+                        "name",
+                    )?;
+                    let arg = resolve_source_add_value(
+                        args.arg.as_deref(),
+                        args.arg_option.as_deref(),
+                        "argument",
+                    )?;
+                    let kind = parse_source_kind(&args.kind)?;
+                    repository.add_source(&name, &arg, kind)?;
                     println!("Done");
                 }
                 SourceCommands::Remove { name } => {
@@ -2024,6 +2037,33 @@ fn print_install_result(result: &InstallResult) {
     }
 }
 
+fn resolve_source_add_value(
+    positional: Option<&str>,
+    option: Option<&str>,
+    label: &str,
+) -> Result<String> {
+    match (positional, option) {
+        (Some(positional), Some(option)) if positional != option => {
+            bail!("conflicting source {label} values were provided")
+        }
+        (_, Some(option)) => Ok(option.to_string()),
+        (Some(positional), _) => Ok(positional.to_string()),
+        (None, None) => bail!("source add requires a {label}"),
+    }
+}
+
+fn parse_source_kind(value: &str) -> Result<SourceKind> {
+    if value.eq_ignore_ascii_case("rest") || value.eq_ignore_ascii_case("Microsoft.Rest") {
+        Ok(SourceKind::Rest)
+    } else if value.eq_ignore_ascii_case("preindexed")
+        || value.eq_ignore_ascii_case("Microsoft.PreIndexed.Package")
+    {
+        Ok(SourceKind::PreIndexed)
+    } else {
+        bail!("unsupported source type: {value}")
+    }
+}
+
 fn do_import(repository: &mut Repository, file_path: &str, dry_run: bool) -> Result<()> {
     let content = std::fs::read_to_string(file_path)?;
     let doc: serde_json::Value = serde_json::from_str(&content)?;
@@ -2099,4 +2139,32 @@ fn do_import(repository: &mut Repository, file_path: &str, dry_run: bool) -> Res
         println!("Import: {total} packages, {found} attempted, {not_found} not found");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_source_add_value_accepts_option_form() {
+        let value = resolve_source_add_value(None, Some("winget.pro"), "name").expect("value");
+        assert_eq!(value, "winget.pro");
+    }
+
+    #[test]
+    fn resolve_source_add_value_rejects_conflicting_values() {
+        assert!(resolve_source_add_value(Some("first"), Some("second"), "name").is_err());
+    }
+
+    #[test]
+    fn parse_source_kind_accepts_winget_rest_type_name() {
+        assert_eq!(
+            parse_source_kind("Microsoft.Rest").expect("kind"),
+            SourceKind::Rest
+        );
+        assert_eq!(
+            parse_source_kind("Microsoft.PreIndexed.Package").expect("kind"),
+            SourceKind::PreIndexed
+        );
+    }
 }
