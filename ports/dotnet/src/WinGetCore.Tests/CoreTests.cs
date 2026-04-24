@@ -350,6 +350,22 @@ public class ModelsTests
     }
 
     [Fact]
+    public void CreateUnsupportedActionResult_MarksNoOpAndWarning()
+    {
+        var result = Repository.CreateUnsupportedActionResult(
+            "Contoso.App",
+            "1.2.3",
+            "install",
+            Repository.InstallUnsupportedWarning);
+
+        Assert.True(result.Success);
+        Assert.True(result.NoOp);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Single(result.Warnings);
+        Assert.Equal(Repository.InstallUnsupportedWarning, result.Warnings[0]);
+    }
+
+    [Fact]
     public void ParseYamlManifest_ReadsInstallerSwitches()
     {
         var yaml = """

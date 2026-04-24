@@ -8,7 +8,7 @@ internal static class InstalledPackages
     public static List<InstalledPackage> Collect(string? scope)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            throw new PlatformNotSupportedException("Installed package discovery is only supported on Windows");
+            return [];
 
         var packages = new List<InstalledPackage>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

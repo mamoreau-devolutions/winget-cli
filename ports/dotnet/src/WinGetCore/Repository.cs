@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using YamlDotNet.Core;
@@ -10,6 +9,10 @@ namespace WinGetCore;
 
 public class Repository : IDisposable
 {
+    internal const string InstalledStateUnsupportedWarning = "Installed package discovery is not supported on this platform; returning no installed packages.";
+    internal const string InstallUnsupportedWarning = "Installing packages is not supported on this platform; no changes were made.";
+    internal const string UninstallUnsupportedWarning = "Uninstalling packages is not supported on this platform; no changes were made.";
+
     private readonly string _appRoot;
     private readonly HttpClient _client;
     private SourceStore _store;
@@ -185,6 +188,8 @@ public class Repository : IDisposable
         bool needsAvailable = hasFilter || query.UpgradeOnly;
         var warnings = new List<string>();
         var installed = InstalledPackages.Collect(query.InstallScope);
+        if (!OperatingSystem.IsWindows())
+            warnings.Add(InstalledStateUnsupportedWarning);
 
         if (needsAvailable && hasFilter)
         {
@@ -267,7 +272,6 @@ public class Repository : IDisposable
         return (manifest, dest);
     }
 
-    [SupportedOSPlatform("windows")]
     public InstallResult Install(PackageQuery query, bool silent)
     {
         return Install(new InstallRequest
@@ -277,14 +281,19 @@ public class Repository : IDisposable
         });
     }
 
-    [SupportedOSPlatform("windows")]
     public InstallResult Install(PackageQuery query, InstallerMode mode)
         => Install(new InstallRequest { Query = query, Mode = mode });
 
-    [SupportedOSPlatform("windows")]
     public InstallResult Install(InstallRequest request)
     {
         var manifest = ResolveManifestForInstall(request);
+        if (!OperatingSystem.IsWindows())
+        {
+            var unsupportedInstallerType = (SelectInstaller(manifest.Installers, request.Query)?.InstallerType ?? "install")
+                .ToLowerInvariant();
+            return CreateUnsupportedActionResult(manifest.Id, manifest.Version, unsupportedInstallerType, InstallUnsupportedWarning);
+        }
+
         EnsurePackageAgreementsAccepted(manifest, request);
         InstallDependencies(manifest, request);
 
@@ -298,6 +307,7 @@ public class Repository : IDisposable
                 InstallerType = "dependencies",
                 ExitCode = 0,
                 Success = true,
+                NoOp = false,
             };
         }
 
@@ -341,10 +351,10 @@ public class Repository : IDisposable
             InstallerType = installerType,
             ExitCode = exitCode,
             Success = exitCode == 0,
+            NoOp = false,
         };
     }
 
-    [SupportedOSPlatform("windows")]
     public InstallResult Uninstall(PackageQuery query, bool silent)
     {
         return Uninstall(new UninstallRequest
@@ -354,9 +364,14 @@ public class Repository : IDisposable
         });
     }
 
-    [SupportedOSPlatform("windows")]
     public InstallResult Uninstall(UninstallRequest request)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            var (packageId, version) = DescribeUninstallTarget(request);
+            return CreateUnsupportedActionResult(packageId, version, "uninstall", UninstallUnsupportedWarning);
+        }
+
         var matches = ResolveUninstallMatches(request);
         var exitCode = 0;
 
@@ -376,6 +391,7 @@ public class Repository : IDisposable
             InstallerType = primary.InstallerCategory ?? "uninstall",
             ExitCode = exitCode,
             Success = exitCode == 0,
+            NoOp = false,
         };
     }
 
@@ -395,7 +411,6 @@ public class Repository : IDisposable
             throw new InvalidOperationException("Package agreements are present; rerun with --accept-package-agreements to continue.");
     }
 
-    [SupportedOSPlatform("windows")]
     private void InstallDependencies(Manifest manifest, InstallRequest request)
     {
         if (request.SkipDependencies)
@@ -424,6 +439,39 @@ public class Repository : IDisposable
                 Force = request.Force,
             });
         }
+    }
+
+    internal static InstallResult CreateUnsupportedActionResult(string packageId, string version, string installerType, string warning)
+    {
+        return new InstallResult
+        {
+            PackageId = string.IsNullOrWhiteSpace(packageId) ? "unknown" : packageId,
+            Version = version ?? string.Empty,
+            InstallerPath = string.Empty,
+            InstallerType = installerType,
+            ExitCode = 0,
+            Success = true,
+            NoOp = true,
+            Warnings = [warning],
+        };
+    }
+
+    private (string PackageId, string Version) DescribeUninstallTarget(UninstallRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.ManifestPath))
+        {
+            var manifest = LoadManifestFromPath(request.ManifestPath!);
+            return (manifest.Id, request.Query.Version ?? manifest.Version);
+        }
+
+        return (
+            request.Query.Id
+                ?? request.Query.Query
+                ?? request.Query.Name
+                ?? request.Query.Moniker
+                ?? request.ProductCode
+                ?? "unknown",
+            request.Query.Version ?? string.Empty);
     }
 
     private List<ListMatch> ResolveUninstallMatches(UninstallRequest request)

@@ -293,6 +293,8 @@ public record InstallResult
     public required string InstallerType { get; init; }
     public int ExitCode { get; init; }
     public bool Success { get; init; }
+    public bool NoOp { get; init; }
+    public List<string> Warnings { get; init; } = [];
 }
 
 // Internal type for installed package tracking

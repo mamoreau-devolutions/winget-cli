@@ -5,6 +5,7 @@ using WinGetCore;
 using YamlDotNet.Serialization;
 
 const string Version = "0.1.0";
+const string UpgradeUnsupportedWarning = "Upgrading packages is not supported on this platform; no changes were made.";
 
 var rootCommand = new RootCommand("Pure C# subset of the winget CLI");
 
@@ -212,6 +213,13 @@ upgradeCommand.SetHandler((ctx) =>
     };
 
     using var repo = Repository.Open();
+    if (doInstall && !OperatingSystem.IsWindows())
+    {
+        PrintWarnings([UpgradeUnsupportedWarning]);
+        Console.WriteLine("No changes were made.");
+        return;
+    }
+
     var result = repo.List(query);
 
     if (!doInstall)
@@ -233,7 +241,6 @@ upgradeCommand.SetHandler((ctx) =>
                 Console.WriteLine($"Upgrading {m.Id} from {m.InstalledVersion} to {m.AvailableVersion ?? "?"} ...");
                 try
                 {
-                    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
                     var installQuery = new PackageQuery { Id = m.Id, Source = m.SourceName };
                     var r = repo.Install(installQuery, silent);
                     Console.WriteLine(r.Success ? $"  Successfully upgraded {m.Id}" : $"  Failed to upgrade {m.Id} (exit code: {r.ExitCode})");
@@ -573,8 +580,6 @@ installCommand.SetHandler((ctx) =>
     var interactive = ctx.ParseResult.GetValueForOption(iInteractiveOpt);
     if (silent && interactive)
         throw new InvalidOperationException("--silent and --interactive cannot be used together.");
-    if (!OperatingSystem.IsWindows())
-        throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
     using var repo = Repository.Open();
     var mode = interactive ? InstallerMode.Interactive : silent ? InstallerMode.Silent : InstallerMode.SilentWithProgress;
     var result = repo.Install(new InstallRequest
@@ -616,9 +621,6 @@ foreach (var o in new Option[] { uiqOpt, uiidOpt, uinameOpt, uimonikerOpt, uisOp
 
 uninstallCommand.SetHandler((ctx) =>
 {
-    if (!OperatingSystem.IsWindows())
-        throw new PlatformNotSupportedException("Uninstalling packages is only supported on Windows");
-
     var query = new PackageQuery
     {
         Query = ctx.ParseResult.GetValueForArgument(uiArg) ?? ctx.ParseResult.GetValueForOption(uiqOpt),
@@ -679,10 +681,18 @@ importCommand.SetHandler((file, dryRun) =>
             {
                 try
                 {
-                    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installing packages is only supported on Windows");
                     Console.Write($"Installing {pkgId}...");
                     var result = repo.Install(new PackageQuery { Id = pkgId }, false);
-                    Console.WriteLine(result.Success ? " done" : $" failed (exit {result.ExitCode})");
+                    if (result.NoOp)
+                    {
+                        Console.WriteLine(" no-op");
+                        PrintWarnings(result.Warnings);
+                    }
+                    else
+                    {
+                        PrintWarnings(result.Warnings);
+                        Console.WriteLine(result.Success ? " done" : $" failed (exit {result.ExitCode})");
+                    }
                 }
                 catch (Exception ex) { Console.Error.WriteLine($" error: {ex.Message}"); }
             }
@@ -927,10 +937,16 @@ static void PrintSources(List<SourceRecord> sources)
 
 static void PrintPackageActionResult(InstallResult result, string action, string actionPastTense)
 {
-    if (result.Success)
-        Console.WriteLine($"Successfully {actionPastTense} {result.PackageId} v{result.Version}");
+    PrintWarnings(result.Warnings);
+    var target = string.IsNullOrWhiteSpace(result.Version)
+        ? result.PackageId
+        : $"{result.PackageId} v{result.Version}";
+    if (result.NoOp)
+        Console.WriteLine($"No changes were made for {target}.");
+    else if (result.Success)
+        Console.WriteLine($"Successfully {actionPastTense} {target}");
     else
-        Console.Error.WriteLine($"Failed to {action} {result.PackageId} v{result.Version} (exit code: {result.ExitCode})");
+        Console.Error.WriteLine($"Failed to {action} {target} (exit code: {result.ExitCode})");
 }
 
 static void PrintErrorLookup(string input)

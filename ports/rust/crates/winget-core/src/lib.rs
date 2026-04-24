@@ -25,6 +25,12 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
 const DEFAULT_USER_AGENT: &str = "winget-rs/0.1";
+const INSTALLED_STATE_UNSUPPORTED_WARNING: &str =
+    "Installed package discovery is not supported on this platform; returning no installed packages.";
+const INSTALL_UNSUPPORTED_WARNING: &str =
+    "Installing packages is not supported on this platform; no changes were made.";
+const UNINSTALL_UNSUPPORTED_WARNING: &str =
+    "Uninstalling packages is not supported on this platform; no changes were made.";
 const REST_SUPPORTED_CONTRACTS: &[&str] = &[
     "1.12.0", "1.10.0", "1.9.0", "1.7.0", "1.6.0", "1.5.0", "1.4.0", "1.1.0", "1.0.0",
 ];
@@ -414,6 +420,8 @@ pub struct InstallResult {
     pub installer_type: String,
     pub exit_code: i32,
     pub success: bool,
+    pub no_op: bool,
+    pub warnings: Vec<String>,
 }
 
 impl InstallerSwitches {
@@ -435,6 +443,32 @@ impl InstallerSwitches {
                 .clone()
                 .or_else(|| fallback.install_location.clone()),
         }
+    }
+}
+
+fn installed_package_discovery_supported() -> bool {
+    cfg!(windows)
+}
+
+fn package_actions_supported() -> bool {
+    cfg!(windows)
+}
+
+fn unsupported_action_result(
+    package_id: impl Into<String>,
+    version: impl Into<String>,
+    installer_type: impl Into<String>,
+    warning: &str,
+) -> InstallResult {
+    InstallResult {
+        package_id: package_id.into(),
+        version: version.into(),
+        installer_path: PathBuf::new(),
+        installer_type: installer_type.into(),
+        exit_code: 0,
+        success: true,
+        no_op: true,
+        warnings: vec![warning.to_string()],
     }
 }
 
@@ -670,6 +704,9 @@ impl Repository {
         let needs_available = has_filter || query.upgrade_only;
 
         let mut warnings = Vec::new();
+        if !installed_package_discovery_supported() {
+            warnings.push(INSTALLED_STATE_UNSUPPORTED_WARNING.to_string());
+        }
         let mut installed = collect_installed_packages(query.install_scope.as_deref())?;
 
         if needs_available && has_filter {
@@ -974,6 +1011,19 @@ impl Repository {
 
     pub fn install_request(&mut self, request: &InstallRequest) -> Result<InstallResult> {
         let manifest = self.resolve_manifest_for_install(request)?;
+        if !package_actions_supported() {
+            let installer_type = select_installer(&manifest.installers, &request.query)
+                .and_then(|installer| installer.installer_type.clone())
+                .unwrap_or_else(|| "install".to_string())
+                .to_lowercase();
+            return Ok(unsupported_action_result(
+                manifest.id.clone(),
+                manifest.version.clone(),
+                installer_type,
+                INSTALL_UNSUPPORTED_WARNING,
+            ));
+        }
+
         self.ensure_package_agreements_accepted(&manifest, request)?;
         self.install_dependencies(&manifest, request, &mut HashSet::new())?;
 
@@ -985,6 +1035,8 @@ impl Repository {
                 installer_type: "dependencies".to_string(),
                 exit_code: 0,
                 success: true,
+                no_op: false,
+                warnings: Vec::new(),
             });
         }
 
@@ -1026,6 +1078,8 @@ impl Repository {
             installer_type,
             exit_code,
             success: exit_code == 0,
+            no_op: false,
+            warnings: Vec::new(),
         })
     }
 
@@ -1040,6 +1094,33 @@ impl Repository {
     }
 
     pub fn uninstall_request(&mut self, request: &UninstallRequest) -> Result<InstallResult> {
+        if !package_actions_supported() {
+            let (package_id, version) = if let Some(path) = &request.manifest_path {
+                let manifest = self.load_manifest_from_path(path)?;
+                (manifest.id, request.query.version.clone().unwrap_or(manifest.version))
+            } else {
+                (
+                    request
+                        .query
+                        .id
+                        .clone()
+                        .or_else(|| request.query.query.clone())
+                        .or_else(|| request.query.name.clone())
+                        .or_else(|| request.query.moniker.clone())
+                        .or_else(|| request.product_code.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    request.query.version.clone().unwrap_or_default(),
+                )
+            };
+
+            return Ok(unsupported_action_result(
+                package_id,
+                version,
+                "uninstall",
+                UNINSTALL_UNSUPPORTED_WARNING,
+            ));
+        }
+
         let matches = self.resolve_uninstall_matches(request)?;
         let mut exit_code = 0;
 
@@ -1064,6 +1145,8 @@ impl Repository {
                 .unwrap_or_else(|| "uninstall".to_string()),
             exit_code,
             success: exit_code == 0,
+            no_op: false,
+            warnings: Vec::new(),
         })
     }
 
@@ -2183,7 +2266,7 @@ fn collect_installed_packages(scope: Option<&str>) -> Result<Vec<InstalledPackag
 
 #[cfg(not(windows))]
 fn collect_installed_packages(_scope: Option<&str>) -> Result<Vec<InstalledPackage>> {
-    bail!("installed package discovery is only supported on Windows");
+    Ok(Vec::new())
 }
 
 #[cfg(windows)]
@@ -5423,6 +5506,21 @@ Installers:
         assert_eq!(documents[0]["PackageName"].as_str(), Some("Test Package One"));
         assert_eq!(documents[1]["ManifestType"].as_str(), Some("singleton"));
         assert_eq!(documents[1]["PackageIdentifier"].as_str(), Some("Test.Package.Two"));
+    }
+
+    #[test]
+    fn unsupported_action_result_marks_noop_and_warning() {
+        let result = unsupported_action_result(
+            "Contoso.App",
+            "1.2.3",
+            "install",
+            INSTALL_UNSUPPORTED_WARNING,
+        );
+
+        assert!(result.success);
+        assert!(result.no_op);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.warnings, vec![INSTALL_UNSUPPORTED_WARNING.to_string()]);
     }
 
     #[test]

@@ -8,6 +8,8 @@ use winget_core::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const UPGRADE_UNSUPPORTED_WARNING: &str =
+    "Upgrading packages is not supported on this platform; no changes were made.";
 
 #[derive(Parser)]
 #[command(name = "winget", about = "Pure Rust subset of the winget CLI", version = VERSION)]
@@ -466,6 +468,12 @@ fn run() -> Result<()> {
                 || args.id.is_some()
                 || args.name.is_some();
             let silent = args.silent;
+            if do_install && !cfg!(windows) {
+                print_warnings(&[UPGRADE_UNSUPPORTED_WARNING.to_string()]);
+                println!("No changes were made.");
+                return Ok(());
+            }
+
             let list_query = ListQuery::from(args);
             let result = repository.list(&list_query)?;
 
@@ -1983,27 +1991,33 @@ fn do_download(result: &ShowResult, download_dir: Option<&str>) -> Result<()> {
 }
 
 fn print_install_result(result: &InstallResult) {
-    if result.success {
+    print_warnings(&result.warnings);
+    let target = if result.version.is_empty() {
+        result.package_id.clone()
+    } else {
+        format!("{} v{}", result.package_id, result.version)
+    };
+    if result.no_op {
+        println!("No changes were made for {target}.");
+    } else if result.success {
         println!(
-            "Successfully {} {} v{}",
+            "Successfully {} {}",
             if result.installer_type == "uninstall" {
                 "uninstalled"
             } else {
                 "installed"
             },
-            result.package_id,
-            result.version
+            target
         );
     } else {
         eprintln!(
-            "Failed to {} {} v{} (exit code: {})",
+            "Failed to {} {} (exit code: {})",
             if result.installer_type == "uninstall" {
                 "uninstall"
             } else {
                 "install"
             },
-            result.package_id,
-            result.version,
+            target,
             result.exit_code
         );
         std::process::exit(result.exit_code);
@@ -2059,6 +2073,10 @@ fn do_import(repository: &mut Repository, file_path: &str, dry_run: bool) -> Res
                             m.id, m.version.as_deref().unwrap_or("?"), source_name
                         );
                         match repository.install(&query, true) {
+                            Ok(r) if r.no_op => {
+                                println!("    NO-OP");
+                                print_warnings(&r.warnings);
+                            }
                             Ok(r) if r.success => println!("    OK"),
                             Ok(r) => println!("    FAILED (exit {})", r.exit_code),
                             Err(e) => println!("    ERROR: {e}"),
