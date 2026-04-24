@@ -24,7 +24,7 @@ const DEFAULT_MARKET: &str = "US";
 const DEFAULT_MAX_RESULTS: usize = 50;
 const LIST_LOOKUP_MAX_RESULTS: usize = 500;
 const PREINDEXED_CANDIDATES: &[&str] = &["source2.msix", "source.msix"];
-const DEFAULT_USER_AGENT: &str = "winget-rs/0.1";
+const DEFAULT_USER_AGENT: &str = "pinget-rs/0.1";
 const INSTALLED_STATE_UNSUPPORTED_WARNING: &str =
     "Installed package discovery is not supported on this platform; returning no installed packages.";
 const INSTALL_UNSUPPORTED_WARNING: &str =
@@ -1059,7 +1059,7 @@ impl Repository {
             let _ = self.uninstall_request(&uninstall_request);
         }
 
-        let temp_dir = std::env::temp_dir().join("winget-rs-install");
+        let temp_dir = std::env::temp_dir().join("pinget-install");
         let (_, installer_path) = self.download_installer_for_request(request, &temp_dir)?;
 
         let installer_type = installer
@@ -2491,7 +2491,7 @@ fn ensure_app_dirs(app_root: &Path) -> Result<()> {
 
 fn default_app_root() -> Result<PathBuf> {
     dirs::data_local_dir()
-        .map(|path| path.join("winget-rs"))
+        .map(|path| path.join("pinget"))
         .ok_or_else(|| anyhow!("unable to determine LocalAppData path"))
 }
 
@@ -4706,7 +4706,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn pins_db_path(app_root: &Path) -> PathBuf {
     // WinGet pins DB: %LOCALAPPDATA%\Microsoft\WinGet\pins.db
-    // Our own pins: %LOCALAPPDATA%\winget-rs\pins.db
+    // Our own pins: %LOCALAPPDATA%\pinget\pins.db
     app_root.join("pins.db")
 }
 
@@ -5256,16 +5256,16 @@ mod tests {
 
     #[test]
     fn repository_options_capture_custom_host_settings() {
-        let options = RepositoryOptions::new(PathBuf::from(r"C:\temp\winget-rs-test"))
-            .with_user_agent("winget-rs-tests/1.0");
+        let options = RepositoryOptions::new(PathBuf::from(r"C:\temp\pinget-test"))
+            .with_user_agent("pinget-rs-tests/1.0");
 
-        assert_eq!(options.app_root, PathBuf::from(r"C:\temp\winget-rs-test"));
-        assert_eq!(options.user_agent, "winget-rs-tests/1.0");
+        assert_eq!(options.app_root, PathBuf::from(r"C:\temp\pinget-test"));
+        assert_eq!(options.user_agent, "pinget-rs-tests/1.0");
     }
 
     #[test]
     fn storage_paths_use_configured_app_root() {
-        let app_root = PathBuf::from(r"C:\temp\winget-rs-test");
+        let app_root = PathBuf::from(r"C:\temp\pinget-test");
         let source = SourceRecord {
             name: "winget/test".to_string(),
             kind: SourceKind::PreIndexed,

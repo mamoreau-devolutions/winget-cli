@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 internal static class PinStore
 {

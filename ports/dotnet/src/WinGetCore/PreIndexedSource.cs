@@ -1,7 +1,7 @@
 using System.IO.Compression;
 using Microsoft.Data.Sqlite;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 internal static class PreIndexedSource
 {
@@ -286,7 +286,7 @@ internal static class PreIndexedSource
     private static string TempCachePath(string bucket, string sourceIdentifier)
     {
         var tempDir = Path.GetTempPath();
-        return Path.Combine(tempDir, "winget-dotnet", bucket, sourceIdentifier);
+        return Path.Combine(tempDir, "pinget", bucket, sourceIdentifier);
     }
 
     private static bool HashMatches(string? expected, byte[] data)

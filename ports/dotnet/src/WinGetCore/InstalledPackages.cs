@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 internal static class InstalledPackages
 {

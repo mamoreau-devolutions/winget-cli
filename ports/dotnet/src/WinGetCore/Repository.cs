@@ -5,7 +5,7 @@ using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 public class Repository : IDisposable
 {
@@ -337,7 +337,7 @@ public class Repository : IDisposable
             }
         }
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "winget-dotnet-install");
+        var tempDir = Path.Combine(Path.GetTempPath(), "pinget-install");
         var (_, installerPath) = DownloadInstaller(request, tempDir);
 
         var installerType = (selectedInstaller.InstallerType ?? "exe").ToLowerInvariant();

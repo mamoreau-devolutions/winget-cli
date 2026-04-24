@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\WinGetCore\WinGetCore.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>true</IsPackable>
+    <AssemblyName>Pinget.PowerShell.Engine</AssemblyName>
+    <RootNamespace>Pinget.PowerShell.Engine</RootNamespace>
+    <PackageId>Pinget.PowerShell.Engine</PackageId>
+    <Description>PowerShell-facing orchestration layer for Pinget built on top of Pinget.Core.</Description>
+  </PropertyGroup>
+</Project>

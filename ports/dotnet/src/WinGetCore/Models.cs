@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 [JsonConverter(typeof(JsonStringEnumConverter<SourceKind>))]
 public enum SourceKind
@@ -27,12 +27,12 @@ public record SourceRecord
 }
 
 /// <summary>
-/// Library-hosting options for the WinGet core API.
+/// Library-hosting options for the Pinget core API.
 /// </summary>
 public record RepositoryOptions
 {
     public string? AppRoot { get; init; }
-    public string UserAgent { get; init; } = "winget-dotnet/0.1";
+    public string UserAgent { get; init; } = "pinget-dotnet/0.1";
 }
 
 public record PackageQuery

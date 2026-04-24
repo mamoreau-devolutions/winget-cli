@@ -1,13 +1,19 @@
 using System.CommandLine;
 using System.Security.Cryptography;
 using System.Text.Json;
-using WinGetCore;
+using Pinget.Core;
 using YamlDotNet.Serialization;
 
 const string Version = "0.1.0";
 const string UpgradeUnsupportedWarning = "Upgrading packages is not supported on this platform; no changes were made.";
 
-var rootCommand = new RootCommand("Pure C# subset of the winget CLI");
+if (args.Length == 1 && (string.Equals(args[0], "--version", StringComparison.OrdinalIgnoreCase) || string.Equals(args[0], "-v", StringComparison.OrdinalIgnoreCase)))
+{
+    PrintVersion();
+    return 0;
+}
+
+var rootCommand = new RootCommand("Pinget: portable winget in pure C#");
 
 var outputOption = new Option<string?>("--output", "Output format: text, json, or yaml");
 outputOption.AddAlias("-o");
@@ -750,11 +756,13 @@ return rootCommand.Invoke(args);
 
 static void PrintInfo()
 {
-    Console.WriteLine($"winget v{Version}");
-    Console.WriteLine("Pure C# subset of the Windows Package Manager CLI");
+    PrintVersion();
+    Console.WriteLine("Pure C# subset of Pinget (portable winget)");
     Console.WriteLine($"Runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
     Console.WriteLine($"OS: {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
 }
+
+static void PrintVersion() => Console.WriteLine($"pinget v{Version}");
 
 static OutputFormat GetOutputFormat(string? value) =>
     value?.ToLowerInvariant() switch

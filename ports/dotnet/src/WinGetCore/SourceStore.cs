@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 internal record SourceStore
 {
@@ -41,7 +41,7 @@ internal static class SourceStoreManager
             return Path.GetFullPath(appRoot);
 
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(localAppData, "winget-dotnet");
+        return Path.Combine(localAppData, "pinget");
     }
 
     public static void EnsureAppDirs(string? appRoot = null)

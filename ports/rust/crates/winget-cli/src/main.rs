@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
-use winget_core::{
+use pinget_core::{
     CacheWarmResult, Documentation, InstallRequest, InstallResult, InstallerMode, ListQuery,
     ListResponse, PackageQuery, PinType, Repository, SearchResponse, ShowResult, SourceKind,
     SourceRecord, SourceUpdateResult, UninstallRequest, VersionsResult,
@@ -12,7 +12,7 @@ const UPGRADE_UNSUPPORTED_WARNING: &str =
     "Upgrading packages is not supported on this platform; no changes were made.";
 
 #[derive(Parser)]
-#[command(name = "winget", about = "Pure Rust subset of the winget CLI", version = VERSION)]
+#[command(name = "pinget", about = "Pinget: portable winget in pure Rust", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -1165,7 +1165,7 @@ fn print_documentation(entries: &[Documentation]) {
 }
 
 fn print_info() {
-    println!("winget-rs v{VERSION}");
+    println!("pinget v{VERSION}");
     println!("Pure Rust subset of the Windows Package Manager CLI");
     println!();
 

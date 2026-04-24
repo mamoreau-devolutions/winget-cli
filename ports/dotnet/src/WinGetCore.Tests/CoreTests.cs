@@ -1,7 +1,7 @@
 using Xunit;
-using WinGetCore;
+using Pinget.Core;
 
-namespace WinGetCore.Tests;
+namespace Pinget.Core.Tests;
 
 public class VersionCompareTests
 {
@@ -41,7 +41,7 @@ public class SourceStoreTests
             using var repo = Repository.Open(new RepositoryOptions
             {
                 AppRoot = appRoot,
-                UserAgent = "winget-dotnet-tests/1.0",
+                UserAgent = "pinget-dotnet-tests/1.0",
             });
 
             repo.AddSource("test", "https://example.com/test", SourceKind.Rest);
@@ -585,7 +585,7 @@ public class RepositoryParityTests
 file static class TestPaths
 {
     public static string CreateTempAppRoot() =>
-        Path.Combine(Path.GetTempPath(), "winget-dotnet-tests", Guid.NewGuid().ToString("N"));
+        Path.Combine(Path.GetTempPath(), "pinget-dotnet-tests", Guid.NewGuid().ToString("N"));
 
     public static void DeleteAppRoot(string appRoot)
     {

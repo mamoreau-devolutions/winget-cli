@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace WinGetCore;
+namespace Pinget.Core;
 
 internal static class RestSource
 {

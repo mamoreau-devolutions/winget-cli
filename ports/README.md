@@ -1,21 +1,23 @@
-# WinGet ports
+# Pinget ports
 
-This directory contains two non-native WinGet client ports that reuse WinGet-style source, manifest, cache, and package-selection logic without using the WinGet COM API.
+This directory contains Devolutions **Pinget** ports: non-native, portable WinGet-compatible implementations that reuse WinGet-style source, manifest, cache, and package-selection logic without using the WinGet COM API.
 
 ## Layout
 
 | Path | Language | Output | Notes |
 | --- | --- | --- | --- |
-| `ports\rust` | Rust | `winget` CLI + `winget-core` library | Cargo workspace with a reusable core crate and a CLI crate |
-| `ports\dotnet` | C# / .NET 10 | `winget` CLI + `WinGetCore` library | Solution with a reusable core library, CLI app, and tests |
+| `ports\rust` | Rust | `pinget` CLI + `pinget-core` library | Cargo workspace with a reusable core crate and a CLI crate |
+| `ports\dotnet` | C# / .NET 10 | `pinget` CLI + `Pinget.Core` library | Solution with a reusable core library, CLI app, tests, and PowerShell scaffolding |
 
 ## C# assembly and namespace structure
 
 | Project | Assembly | Primary namespace | Role |
 | --- | --- | --- | --- |
-| `ports\dotnet\src\WinGetCore\WinGetCore.csproj` | `WinGetCore.dll` | `WinGetCore` | Core library |
-| `ports\dotnet\src\WinGetCli\WinGetCli.csproj` | `winget.dll` | top-level statements in `Program.cs` | CLI front end |
-| `ports\dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj` | `WinGetCore.Tests.dll` | `WinGetCore.Tests` | Tests |
+| `ports\dotnet\src\WinGetCore\WinGetCore.csproj` | `Pinget.Core.dll` | `Pinget.Core` | Core library |
+| `ports\dotnet\src\WinGetCli\WinGetCli.csproj` | `pinget.dll` | `Pinget.Cli` (top-level statements in `Program.cs`) | CLI front end |
+| `ports\dotnet\src\WinGetCore.Tests\WinGetCore.Tests.csproj` | `Pinget.Core.Tests.dll` | `Pinget.Core.Tests` | Tests |
+| `ports\dotnet\src\Pinget.PowerShell.Engine\Pinget.PowerShell.Engine.csproj` | `Pinget.PowerShell.Engine.dll` | `Pinget.PowerShell.Engine` | Future PowerShell engine layer |
+| `ports\dotnet\src\Pinget.PowerShell.Cmdlets\Pinget.PowerShell.Cmdlets.csproj` | `Pinget.PowerShell.Cmdlets.dll` | `Pinget.PowerShell.Cmdlets` | Future cmdlet layer |
 
 ## Current scope
 
@@ -51,13 +53,13 @@ The CLI accepts both:
 1. The earlier positional form:
 
 ```powershell
-winget source add winget.pro https://api.example.test/feed --type Microsoft.Rest
+pinget source add winget.pro https://api.example.test/feed --type Microsoft.Rest
 ```
 
 2. The upstream-style option form:
 
 ```powershell
-winget source add -n winget.pro -a https://api.example.test/feed -t Microsoft.Rest --trust-level trusted
+pinget source add -n winget.pro -a https://api.example.test/feed -t Microsoft.Rest --trust-level trusted
 ```
 
 Notes:
@@ -71,14 +73,14 @@ Notes:
 ### Rust
 
 ```powershell
-cargo test -p winget-core --manifest-path ports\rust\Cargo.toml
-cargo build -p winget-cli --release --manifest-path ports\rust\Cargo.toml
+cargo test -p pinget-core --manifest-path ports\rust\Cargo.toml
+cargo build -p pinget-cli --release --manifest-path ports\rust\Cargo.toml
 ```
 
 Run:
 
 ```powershell
-cargo run -p winget-cli --manifest-path ports\rust\Cargo.toml -- search WinMerge
+cargo run -p pinget-cli --manifest-path ports\rust\Cargo.toml -- search WinMerge
 ```
 
 ### C#
@@ -98,18 +100,20 @@ dotnet run --project ports\dotnet\src\WinGetCli\WinGetCli.csproj -- search WinMe
 
 ### Rust
 
-- `ports\rust\crates\winget-core` - core repository, source, manifest, and action logic
-- `ports\rust\crates\winget-cli` - CLI wrapper
+- `ports\rust\crates\winget-core` - `pinget-core` library source
+- `ports\rust\crates\winget-cli` - `pinget` CLI wrapper
 
 ### C#
 
-- `ports\dotnet\src\WinGetCore` - core library
-- `ports\dotnet\src\WinGetCli` - CLI wrapper
+- `ports\dotnet\src\WinGetCore` - `Pinget.Core` library
+- `ports\dotnet\src\WinGetCli` - `Pinget.Cli` wrapper
 - `ports\dotnet\src\WinGetCore.Tests` - tests
+- `ports\dotnet\src\Pinget.PowerShell.Engine` - PowerShell engine scaffold
+- `ports\dotnet\src\Pinget.PowerShell.Cmdlets` - cmdlet scaffold
 
 ## Status
 
-These ports are best treated as **experimental WinGet-compatible implementations** focused on:
+These ports are best treated as **experimental Pinget / portable winget implementations** focused on:
 
 - source-backed package discovery
 - manifest retrieval and shaping

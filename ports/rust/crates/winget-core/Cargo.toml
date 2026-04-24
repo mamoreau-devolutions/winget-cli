@@ -1,8 +1,8 @@
 [package]
-name = "winget-core"
+name = "pinget-core"
 version = "0.1.0"
 edition = "2024"
-description = "Pure Rust WinGet core library that works directly with source caches, REST endpoints, and installed package state without COM."
+description = "Pure Rust Pinget core library that works directly with source caches, REST endpoints, and installed package state without COM."
 license = "MIT"
 
 [dependencies]
