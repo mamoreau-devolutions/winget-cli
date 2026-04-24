@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Pinget.PowerShell.Engine.PSObjects;
 
 public sealed class PSDownloadResult
@@ -14,7 +12,7 @@ public sealed class PSDownloadResult
 
     public string Status { get; init; } = "Ok";
 
-    public Exception ExtendedErrorCode => new COMException("Pinget download operation result.", 0);
+    public Exception ExtendedErrorCode => new PingetOperationException("Pinget download operation result.", 0);
 
     public required string Version { get; init; }
 

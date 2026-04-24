@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Pinget.PowerShell.Engine.PSObjects;
 
 public sealed class PSUninstallResult
@@ -18,7 +16,7 @@ public sealed class PSUninstallResult
 
     public string Status { get; init; } = "Unknown";
 
-    public Exception ExtendedErrorCode => new COMException("Pinget uninstall operation result.", unchecked((int)UninstallerErrorCode));
+    public Exception ExtendedErrorCode => new PingetOperationException("Pinget uninstall operation result.", unchecked((int)UninstallerErrorCode));
 
     public bool Succeeded() => string.Equals(Status, "Ok", StringComparison.OrdinalIgnoreCase);
 

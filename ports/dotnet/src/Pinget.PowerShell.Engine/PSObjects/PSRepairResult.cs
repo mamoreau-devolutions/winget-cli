@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Pinget.PowerShell.Engine.PSObjects;
 
 public sealed class PSRepairResult
@@ -18,7 +16,7 @@ public sealed class PSRepairResult
 
     public string Status { get; init; } = "Unknown";
 
-    public Exception ExtendedErrorCode => new COMException("Pinget repair operation result.", unchecked((int)RepairErrorCode));
+    public Exception ExtendedErrorCode => new PingetOperationException("Pinget repair operation result.", unchecked((int)RepairErrorCode));
 
     public bool Succeeded() => string.Equals(Status, "Ok", StringComparison.OrdinalIgnoreCase);
 

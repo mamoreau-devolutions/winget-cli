@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Pinget.PowerShell.Engine.PSObjects;
 
 public sealed class PSInstallResult
@@ -18,7 +16,7 @@ public sealed class PSInstallResult
 
     public string Status { get; init; } = "Unknown";
 
-    public Exception ExtendedErrorCode => new COMException("Pinget install operation result.", unchecked((int)InstallerErrorCode));
+    public Exception ExtendedErrorCode => new PingetOperationException("Pinget install operation result.", unchecked((int)InstallerErrorCode));
 
     public bool Succeeded() => string.Equals(Status, "Ok", StringComparison.OrdinalIgnoreCase);
 

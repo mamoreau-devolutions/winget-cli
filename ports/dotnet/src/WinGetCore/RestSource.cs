@@ -74,7 +74,7 @@ internal static class RestSource
     public static string? ChooseContract(IEnumerable<string> serverVersions)
     {
         var serverSet = new HashSet<string>(serverVersions);
-        return SupportedContracts.FirstOrDefault(c => serverSet.Contains(c));
+        return SupportedContracts.FirstOrDefault(serverSet.Contains);
     }
 
     public static (List<RestMatchResult> Results, bool Truncated) Search(

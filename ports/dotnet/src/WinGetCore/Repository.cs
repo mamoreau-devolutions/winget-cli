@@ -337,7 +337,7 @@ public class Repository : IDisposable
         var filtered = installed
             .Where(p => ListPackageMatches(p, query) &&
                 (!query.UpgradeOnly || InstalledPackageMatchesUpgradeFilter(p, query)))
-            .OrderBy(p => ListSortWeight(p))
+            .OrderBy(ListSortWeight)
             .ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(p => p.LocalId)
             .ToList();
@@ -724,7 +724,7 @@ public class Repository : IDisposable
         return null;
     }
 
-    private (string PackageId, string Version) DescribeUninstallTarget(UninstallRequest request)
+    private static (string PackageId, string Version) DescribeUninstallTarget(UninstallRequest request)
     {
         if (!string.IsNullOrWhiteSpace(request.ManifestPath))
         {
@@ -787,7 +787,7 @@ public class Repository : IDisposable
         return request.AllVersions ? matches : [matches[0]];
     }
 
-    private Manifest LoadManifestFromPath(string manifestPath)
+    private static Manifest LoadManifestFromPath(string manifestPath)
     {
         var resolved = ResolveManifestPath(manifestPath);
         return ParseYamlManifest(File.ReadAllBytes(resolved));
@@ -874,9 +874,13 @@ public class Repository : IDisposable
             {
                 Display = new SearchMatch
                 {
-                    SourceName = source.Name, SourceKind = source.Kind,
-                    Id = r.Id, Name = r.Name, Moniker = r.Moniker,
-                    Version = r.Version, MatchCriteria = r.MatchCriteria,
+                    SourceName = source.Name,
+                    SourceKind = source.Kind,
+                    Id = r.Id,
+                    Name = r.Name,
+                    Moniker = r.Moniker,
+                    Version = r.Version,
+                    MatchCriteria = r.MatchCriteria,
                 },
                 SourceIndex = sourceIndex,
                 Locator = new PreIndexedV2Locator(r.PackageRowId, r.PackageHash),
@@ -890,9 +894,13 @@ public class Repository : IDisposable
             {
                 Display = new SearchMatch
                 {
-                    SourceName = source.Name, SourceKind = source.Kind,
-                    Id = r.Id, Name = r.Name, Moniker = r.Moniker,
-                    Version = r.Version, Channel = string.IsNullOrEmpty(r.Channel) ? null : r.Channel,
+                    SourceName = source.Name,
+                    SourceKind = source.Kind,
+                    Id = r.Id,
+                    Name = r.Name,
+                    Moniker = r.Moniker,
+                    Version = r.Version,
+                    Channel = string.IsNullOrEmpty(r.Channel) ? null : r.Channel,
                     MatchCriteria = r.MatchCriteria,
                 },
                 SourceIndex = sourceIndex,
@@ -912,8 +920,11 @@ public class Repository : IDisposable
         {
             Display = new SearchMatch
             {
-                SourceName = source.Name, SourceKind = source.Kind,
-                Id = r.PackageId, Name = r.PackageName, Moniker = r.Moniker,
+                SourceName = source.Name,
+                SourceKind = source.Kind,
+                Id = r.PackageId,
+                Name = r.PackageName,
+                Moniker = r.Moniker,
                 Version = r.LatestVersion.Version,
                 Channel = string.IsNullOrEmpty(r.LatestVersion.Channel) ? null : r.LatestVersion.Channel,
                 MatchCriteria = r.MatchCriteria,
@@ -1441,28 +1452,6 @@ public class Repository : IDisposable
     private static string? GetDocumentString(Dictionary<string, object?> source, string key) =>
         source.TryGetValue(key, out var value) ? value?.ToString() : null;
 
-    private static List<PackageAgreement> ReadAgreements(IDictionary<object, object> values)
-    {
-        if (!values.TryGetValue("Agreements", out var agreementsObj) || agreementsObj is not IList<object> agreementsList)
-            return [];
-
-        var agreements = new List<PackageAgreement>();
-        foreach (var agreement in agreementsList)
-        {
-            if (agreement is not IDictionary<object, object> agreementDict)
-                continue;
-
-            agreements.Add(new PackageAgreement
-            {
-                Label = agreementDict.TryGetValue("AgreementLabel", out var label) ? label?.ToString() : null,
-                Text = agreementDict.TryGetValue("Agreement", out var text) ? text?.ToString() : null,
-                Url = agreementDict.TryGetValue("AgreementUrl", out var url) ? url?.ToString() : null,
-            });
-        }
-
-        return agreements;
-    }
-
     private static List<PackageAgreement> ReadAgreements(IDictionary<string, object?> values)
     {
         if (!values.TryGetValue("Agreements", out var agreementsObj) || agreementsObj is not IList<object> agreementsList)
@@ -1577,7 +1566,7 @@ public class Repository : IDisposable
     }
 
     private static string NormalizeCorrelationName(string value) =>
-        new(value.Where(c => char.IsAsciiLetterOrDigit(c)).Select(char.ToLowerInvariant).ToArray());
+        new(value.Where(char.IsAsciiLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     private static bool ListPackageMatches(InstalledPackage pkg, ListQuery query)
     {
@@ -1900,9 +1889,15 @@ public class Repository : IDisposable
 
     private static PackageQuery PackageQueryFromListQuery(ListQuery query) => new()
     {
-        Query = query.Query, Id = query.Id, Name = query.Name, Moniker = query.Moniker,
-        Tag = query.Tag, Command = query.Command, Source = query.Source,
-        Count = 500, Exact = query.Exact,
+        Query = query.Query,
+        Id = query.Id,
+        Name = query.Name,
+        Moniker = query.Moniker,
+        Tag = query.Tag,
+        Command = query.Command,
+        Source = query.Source,
+        Count = 500,
+        Exact = query.Exact,
         Version = null,
     };
 

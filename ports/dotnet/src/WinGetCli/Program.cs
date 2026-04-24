@@ -589,10 +589,7 @@ var errorCommand = new Command("error", "Look up error codes");
 var errInputArg = new Argument<string>("input", "Error code");
 errorCommand.AddArgument(errInputArg);
 
-errorCommand.SetHandler((input) =>
-{
-    PrintErrorLookup(input);
-}, errInputArg);
+errorCommand.SetHandler(PrintErrorLookup, errInputArg);
 
 // ── Settings ──
 var settingsCommand = new Command("settings", "Settings");
